@@ -867,7 +867,8 @@ export default function ImportPage() {
     } finally {
       setPromoteStagedRunning(false);
       // Refresh data status
-      const status = await getDataStatus();
+      const season = new Date().getFullYear();
+      const status = await getDataStatus(season);
       setDataStatus(status);
     }
   }

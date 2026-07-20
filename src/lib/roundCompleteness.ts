@@ -53,7 +53,7 @@ export async function getRoundStatsCompleteness(season: number, round: string): 
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const completedMatches = matches.filter(m => m.match_date < today);
+  const completedMatches = matches.filter(m => m.match_date != null && m.match_date < today);
 
   const matchIds = matches.map(m => m.id);
   const { data: allStats } = await supabase
@@ -107,7 +107,7 @@ export async function getRoundStatsCompleteness(season: number, round: string): 
       else seen.add(key);
     }
 
-    const isCompleted = m.match_date < today;
+    const isCompleted = m.match_date != null && m.match_date < today;
     let status: RoundMatchCompleteness['status'] = 'MISSING_STATS';
     let reason = '';
 
@@ -139,10 +139,10 @@ export async function getRoundStatsCompleteness(season: number, round: string): 
 
     matchResults.push({
       matchId: m.id,
-      homeTeam: m.home_team,
-      awayTeam: m.away_team,
-      matchDate: m.match_date,
-      round: m.round,
+      homeTeam: m.home_team ?? '',
+      awayTeam: m.away_team ?? '',
+      matchDate: m.match_date ?? '',
+      round: m.round ?? '',
       uniquePlayers: uniquePlayerIds.size,
       homePlayers: homePlayers.size,
       awayPlayers: awayPlayers.size,

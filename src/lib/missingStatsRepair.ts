@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import type { PlayerGameStat } from './types';
 
 // ── Types ──
 
@@ -667,7 +668,9 @@ export async function applySafeRepair(matchIds: string[]): Promise<ApplyResult> 
 
         const { error: insertError } = await supabase
           .from('player_game_stats')
-          .upsert(insertData, { onConflict: 'player_id,match_id' });
+          // insertData is assembled from loosely-typed raw_kali staging rows;
+          // cast preserves the existing promotion behaviour.
+          .upsert(insertData as unknown as PlayerGameStat, { onConflict: 'player_id,match_id' });
 
         if (insertError) {
           errors.push(`Promote error for ${repair.playerName}: ${insertError.message}`);
@@ -1443,7 +1446,7 @@ export async function completeCoverageForMatches(matchIds: string[]): Promise<Co
             batchErrors.push(...(br.errors ?? []));
 
             // Auto-pause if rate limit low
-            if (br.rateLimitRemaining !== null && br.rateLimitRemaining < 20) {
+            if (br.rateLimitRemaining != null && br.rateLimitRemaining < 20) {
               batchErrors.push(`Paused — rate limit low (${br.rateLimitRemaining} remaining). ${needsBackfill.length - i - batch.length} players still pending.`);
               break;
             }
@@ -1895,7 +1898,7 @@ export async function fixAllNoStatsFromDb(
             batchDetails = br.details ?? [];
             errors.push(...(br.errors ?? []));
 
-            if (br.rateLimitRemaining !== null && br.rateLimitRemaining < 20) {
+            if (br.rateLimitRemaining != null && br.rateLimitRemaining < 20) {
               errors.push(`Paused — rate limit low (${br.rateLimitRemaining} remaining). ${needsBackfill.length - i - batch.length} players still pending.`);
               break;
             }

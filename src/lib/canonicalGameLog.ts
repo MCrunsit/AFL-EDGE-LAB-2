@@ -259,7 +259,7 @@ export async function getCanonicalPlayerGameLog(
 
   const enriched: CanonicalGameRow[] = [];
 
-  for (const r of raw as RawRow[]) {
+  for (const r of raw as unknown as RawRow[]) {
     if (!r.match_date) continue;
 
     const matchInfo = r.matches;
@@ -463,8 +463,10 @@ export async function batchGetCanonicalGameLogs(
     return results;
   }
 
-  // Group by player_id
-  const byPlayer = new Map<string, typeof raw>();
+  // Group by player_id. Rows carry an embedded `matches` relation that
+  // postgrest-js cannot type without a declared FK relationship, so we keep
+  // these staging rows loosely typed (consistent with the cast below).
+  const byPlayer = new Map<string, any[]>();
   for (const r of raw as any[]) {
     const pid = r.player_id as string;
     if (!byPlayer.has(pid)) byPlayer.set(pid, []);

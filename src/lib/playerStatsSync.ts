@@ -37,6 +37,7 @@ export interface StatsImportValidation {
   totalRows: number;
   validRows: number;
   invalidRows: number;
+  failedRows: number;
   errors: { row: number; message: string }[];
   inserted: number;
   updated: number;
@@ -243,6 +244,7 @@ export async function importValidatedStats(rows: Record<string, string>[]): Prom
     totalRows: rows.length,
     validRows: 0,
     invalidRows: 0,
+    failedRows: 0,
     errors: [],
     inserted: 0,
     updated: 0,

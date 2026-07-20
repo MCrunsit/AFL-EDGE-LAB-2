@@ -89,7 +89,6 @@ const TEAM_CANONICAL_MAP: Record<string, string> = {
   'st kilda saints': 'St Kilda',
   'sydney swans': 'Sydney',
   'west coast eagles': 'West Coast',
-  'western bulldogs': 'Western Bulldogs',
 };
 
 /**

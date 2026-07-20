@@ -291,7 +291,7 @@ export function calculateModelProb(
     venue_adjustment: venueAdjustment,
     opponent_adjustment: opponentAdjustment,
     tags,
-    context,
+    context: context ?? null,
     quality_score: 0,
     risk_level: 'Medium',
     sampleWindow,
@@ -596,7 +596,7 @@ export async function getModelledBookmakerOddsForMatch(
 
     const peStatType = extractStatType(row.raw_market);
     const positionEdge = (usePositionEdge && opponent)
-      ? getPositionEdge(positionEdgeCache, positionGroup, opponent, peStatType)
+      ? getPositionEdge(positionEdgeCache, positionGroup, opponent, peStatType ?? '')
       : null;
     const impliedProb = 1 / row.over_odds;
 
@@ -628,7 +628,7 @@ export async function getModelledBookmakerOddsForMatch(
     const venueEdgeAdjustment = capVenueAdjustment(rawVenueAdj);
 
     const opponentEdge = (useOpponentEdge && passesRealisticFilters && resolvedPlayerId && historicalStatsCache && peStatType)
-      ? getOpponentEdgeFromCache(historicalStatsCache, resolvedPlayerId, peStatType as StatType, playerTeam, matchHome, matchAway).result
+      ? getOpponentEdgeFromCache(historicalStatsCache, resolvedPlayerId, peStatType as StatType, playerTeam, matchHome ?? '', matchAway ?? '').result
       : null;
     const rawOppAdj = opponentEdge ? opponentEdge.edge_value : 0;
     const opponentEdgeAdjustment = capOpponentAdjustment(rawOppAdj);

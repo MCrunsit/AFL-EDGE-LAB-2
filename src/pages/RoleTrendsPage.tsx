@@ -55,7 +55,9 @@ export default function RoleTrendsPage() {
         .order('updated_at', { ascending: false });
 
       if (error) throw error;
-      setData(rows ?? []);
+      // Query selects a subset of player_role_data columns; RoleDataRow is the
+      // display shape. Cast preserves existing runtime behaviour.
+      setData((rows ?? []) as unknown as RoleDataRow[]);
 
       // Build player summaries
       const byPlayer = new Map<string, RoleDataRow[]>();

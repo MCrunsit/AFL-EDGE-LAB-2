@@ -164,7 +164,7 @@ function rowToLeg(
   roleTrends?: RoleTrendMap,
 ): OptimizerLeg {
   const playerId = row.resolvedPlayerId ?? row.player_id ?? row.player_name;
-  const team = row.team ?? '';
+  const team = row.playerTeam ?? '';
   const env = teamEnv?.get(team);
   const role = roleTrends?.get(playerId);
 

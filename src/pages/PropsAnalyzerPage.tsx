@@ -144,10 +144,10 @@ export default function PropsAnalyzerPage() {
                       {bookmakerOdds.map(b => (
                         <tr key={b.id} className="border-b border-gray-800/30 hover:bg-gray-800/30">
                           <td className="py-2 px-2 text-white font-medium capitalize">{b.bookmaker_id}</td>
-                          <td className="py-2 px-2 text-gray-400 font-mono text-xs" title={(b as Record<string, unknown>).raw_market as string ?? b.market}>{((b as Record<string, unknown>).raw_market as string) ?? b.market}</td>
+                          <td className="py-2 px-2 text-gray-400 font-mono text-xs" title={(b as unknown as Record<string, unknown>).raw_market as string ?? b.market}>{((b as unknown as Record<string, unknown>).raw_market as string) ?? b.market}</td>
                           <td className="py-2 px-2 text-center text-gray-300 tabular-nums">{Number(b.line).toFixed(1)}</td>
                           <td className="py-2 px-2 text-center text-emerald-400 font-semibold tabular-nums">{b.over_odds.toFixed(2)}</td>
-                          <td className="py-2 px-2 text-center text-red-400 font-semibold tabular-nums">{b.under_odds.toFixed(2)}</td>
+                          <td className="py-2 px-2 text-center text-red-400 font-semibold tabular-nums">{b.under_odds != null ? b.under_odds.toFixed(2) : '—'}</td>
                         </tr>
                       ))}
                     </tbody>

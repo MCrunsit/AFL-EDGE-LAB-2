@@ -119,8 +119,8 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
     if (!byPlayer.has(pid)) byPlayer.set(pid, []);
     byPlayer.get(pid)!.push({
       playerId: pid,
-      matchId: row.match_id,
-      round: row.round,
+      matchId: row.match_id ?? '',
+      round: row.round ?? '',
       cbaPercentage: row.cba_percentage ?? 0,
       cbaCount: row.cba_count ?? 0,
       teamCbaTotal: row.team_cba_total ?? 0,

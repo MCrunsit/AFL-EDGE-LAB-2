@@ -31,8 +31,8 @@ export default function TeamStatsPage() {
 
         const allMatches = (fixtures ?? []) as Match[];
         const today = new Date().toISOString().split('T')[0];
-        const upcoming = allMatches.filter(m => m.match_date >= today);
-        const completed = allMatches.filter(m => m.match_date < today).reverse();
+        const upcoming = allMatches.filter(m => m.match_date != null && m.match_date >= today);
+        const completed = allMatches.filter(m => m.match_date != null && m.match_date < today).reverse();
         setUpcomingMatches(upcoming);
         setHistoryMatches(completed);
 

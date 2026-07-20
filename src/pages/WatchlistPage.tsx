@@ -41,7 +41,7 @@ export default function WatchlistPage() {
       .from('watchlist')
       .select('*')
       .order('created_at', { ascending: false });
-    setItems(data ?? []);
+    setItems((data ?? []) as unknown as WatchlistItem[]);
     setLoading(false);
   }, []);
 

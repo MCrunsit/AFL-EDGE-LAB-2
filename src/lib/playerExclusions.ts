@@ -54,7 +54,7 @@ export function clearExcludedPlayers(matchId: string): void {
 }
 
 export function isPlayerExcluded(matchId: string, playerId: string): boolean {
-  return getExcludedPlayers(matchId).some(p => p.playerId === player.playerId);
+  return getExcludedPlayers(matchId).some(p => p.playerId === playerId);
 }
 
 export function getExcludedPlayerIds(matchId: string): Set<string> {

@@ -154,8 +154,8 @@ export default function PlayerFormPage() {
   }, [stats, statType, opponentStats, venueStats]);
 
   const sorted = useMemo(() => [...stats].sort((a, b) => new Date(b.match_date).getTime() - new Date(a.match_date).getTime()), [stats]);
-  const last5Values = useMemo(() => sorted.slice(0, 5).reverse().map(s => Number((s as Record<string, unknown>)[statType]) || 0), [sorted, statType]);
-  const allValues = useMemo(() => sorted.map(s => Number((s as Record<string, unknown>)[statType]) || 0), [sorted, statType]);
+  const last5Values = useMemo(() => sorted.slice(0, 5).reverse().map(s => Number((s as unknown as Record<string, unknown>)[statType]) || 0), [sorted, statType]);
+  const allValues = useMemo(() => sorted.map(s => Number((s as unknown as Record<string, unknown>)[statType]) || 0), [sorted, statType]);
   const line = parseFloat(lineInput) || undefined;
 
   const hitRateLast5 = useMemo(() => {
@@ -357,7 +357,7 @@ export default function PlayerFormPage() {
                 </thead>
                 <tbody>
                   {sorted.slice(0, 5).map(s => {
-                    const val = Number((s as Record<string, unknown>)[statType]) || 0;
+                    const val = Number((s as unknown as Record<string, unknown>)[statType]) || 0;
                     const hit = line ? val > line : null;
                     return (
                       <tr key={s.id} className="border-b border-gray-800/30 hover:bg-gray-800/30 transition">

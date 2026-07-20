@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import type { PlayerGameStat } from './types';
 
 export interface MissingStatsEntry {
   playerName: string;
@@ -376,7 +377,9 @@ export async function repairGlobalNoStatsPlayerLinks(matchIds: string[]): Promis
 
             const { error: insertErr } = await supabase
               .from('player_game_stats')
-              .upsert(insertData, { onConflict: 'player_id,match_id' });
+              // insertData is assembled from loosely-typed raw_kali staging rows;
+              // cast preserves the existing promotion behaviour.
+              .upsert(insertData as unknown as PlayerGameStat, { onConflict: 'player_id,match_id' });
 
             if (insertErr) {
               result.errors++;

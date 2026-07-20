@@ -40,7 +40,7 @@ export function calculateBetQualityScore(
 
   // Extract values for this stat type
   const values = stats
-    .map(s => (s as Record<string, unknown>)[statType])
+    .map(s => (s as unknown as Record<string, unknown>)[statType])
     .filter(v => typeof v === 'number' && isFinite(v)) as number[];
 
   if (values.length === 0) return null;

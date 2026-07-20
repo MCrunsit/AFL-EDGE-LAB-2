@@ -97,7 +97,7 @@ export async function ingestBookmakerOdds(
     raw_line: String(o.line),            // Audit trail
     over_odds: o.over_odds,
     under_odds: o.under_odds,
-    bookmaker_player_name: o.bookmaker_player_name || null,
+    bookmaker_player_name: o.bookmaker_player_name || 'unknown',
     fetched_at: fetchedAt,
     valid_until: new Date(Date.now() + CACHE_TTL_MS).toISOString(),
     source: 'bookmaker_feed',

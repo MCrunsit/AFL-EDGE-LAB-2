@@ -94,8 +94,20 @@ export async function getRoundInfo(season = 2026): Promise<RoundInfo> {
     }
   }
 
-  const fixturesReady = nextRoundFixtures.length > 0;
-  const oddsReady = nextRoundOddsCount > 0;
+  // A round is only "ready" if it actually lies in the future. The next
+  // betting round is derived as (latest completed stats round + 1), but when
+  // stats sync lags behind real life that computed round can already have been
+  // played — its fixtures exist in the DB with past dates. Without this guard
+  // the status panel reports a finished round as "Ready" while Match Hub (which
+  // filters on match_date >= today) correctly shows no upcoming fixtures.
+  const today = new Date().toISOString().split('T')[0];
+  const hasFutureFixture = nextRoundFixtures.some(m => {
+    const when = (m.commence_time_utc ?? m.match_date ?? '').split('T')[0];
+    return when >= today;
+  });
+
+  const fixturesReady = nextRoundFixtures.length > 0 && hasFutureFixture;
+  const oddsReady = fixturesReady && nextRoundOddsCount > 0;
   const readyForMultiBuilder = fixturesReady && oddsReady;
 
   return {
