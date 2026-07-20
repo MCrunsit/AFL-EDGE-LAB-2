@@ -262,7 +262,7 @@ export async function getPlayerVsOpponent(
     .in('match_id', matchIds)
     .not(statType, 'is', null);
 
-  const values = (statsRows ?? []).map(r => (r as Record<string, number>)[statType]).filter(v => v != null && isFinite(v));
+  const values = (statsRows ?? []).map(r => (r as unknown as Record<string, number>)[statType]).filter(v => v != null && isFinite(v));
   const avg = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
   return { avg, games: values.length, values };
 }
@@ -284,7 +284,7 @@ export async function getPlayerVenueSplit(
     .ilike('venue', `%${venue.trim()}%`)
     .not(statType, 'is', null);
 
-  const values = (data ?? []).map(r => (r as Record<string, number>)[statType]).filter(v => isFinite(v));
+  const values = (data ?? []).map(r => (r as unknown as Record<string, number>)[statType]).filter(v => isFinite(v));
   const avg = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
   return { avg, games: values.length };
 }
@@ -578,7 +578,7 @@ export async function getPlayerVenueHomeAwaySplit(
 // Stored in bookmaker_odds table, ingested via bookmaker-odds-ingest edge function
 // ---------------------------------------------------------------------------
 
-import type { BookmakerOdds, Bookmaker, BookmakerIngestResult } from './types';
+import type { Bookmaker, BookmakerIngestResult } from './types';
 
 /**
  * Get all bookmakers and their fetch status.

@@ -198,7 +198,7 @@ export function calculateEVFromOddsRow(
 ): { over: EVResult; under: EVResult } {
   return {
     over: calculateExpectedValue(userProbOver, row.over_odds),
-    under: calculateExpectedValue(1 - userProbOver, row.under_odds),
+    under: calculateExpectedValue(1 - userProbOver, row.under_odds ?? 0),
   };
 }
 
@@ -258,7 +258,7 @@ export function computeLadderEV(
   );
 
   const overEV = calculateExpectedValue(ladderProb.probability, row.over_odds);
-  const underEV = calculateExpectedValue(1 - ladderProb.probability, row.under_odds);
+  const underEV = calculateExpectedValue(1 - ladderProb.probability, row.under_odds ?? 0);
 
   ladderProb.implied_prob_from_odds = calculateImpliedProbability(row.over_odds);
   ladderProb.ev = overEV.ev;
@@ -324,7 +324,7 @@ export function comparePlayerForm(
   const sorted = [...stats].sort(
     (a, b) => new Date(b.match_date).getTime() - new Date(a.match_date).getTime()
   );
-  const values = sorted.map(s => Number((s as Record<string, unknown>)[statType]) || 0);
+  const values = sorted.map(s => Number((s as unknown as Record<string, unknown>)[statType]) || 0);
   const last5 = values.slice(0, 5);
   const last5Avg = last5.length > 0 ? last5.reduce((a, b) => a + b, 0) / last5.length : 0;
   const seasonAvg = values.reduce((a, b) => a + b, 0) / values.length;
@@ -332,7 +332,7 @@ export function comparePlayerForm(
   let opponentAvg: number | null = null;
   let opponentGames = 0;
   if (options?.opponentStats && options.opponentStats.length > 0) {
-    const vals = options.opponentStats.map(s => Number((s as Record<string, unknown>)[statType]) || 0);
+    const vals = options.opponentStats.map(s => Number((s as unknown as Record<string, unknown>)[statType]) || 0);
     opponentAvg = vals.reduce((a, b) => a + b, 0) / vals.length;
     opponentGames = vals.length;
   }
@@ -340,7 +340,7 @@ export function comparePlayerForm(
   let venueAvg: number | null = null;
   let venueGames = 0;
   if (options?.venueStats && options.venueStats.length > 0) {
-    const vals = options.venueStats.map(s => Number((s as Record<string, unknown>)[statType]) || 0);
+    const vals = options.venueStats.map(s => Number((s as unknown as Record<string, unknown>)[statType]) || 0);
     venueAvg = vals.reduce((a, b) => a + b, 0) / vals.length;
     venueGames = vals.length;
   }
@@ -413,7 +413,7 @@ export function buildMultiCandidates(
     if (!probs) continue;
 
     const overEV = calculateExpectedValue(probs.over, row.over_odds);
-    const underEV = calculateExpectedValue(probs.under, row.under_odds);
+    const underEV = calculateExpectedValue(probs.under, row.under_odds ?? 0);
 
     if (overEV.edge === 'positive') {
       scoredLegs.push({
@@ -429,7 +429,7 @@ export function buildMultiCandidates(
       scoredLegs.push({
         row,
         side: 'under',
-        odds: row.under_odds,
+        odds: row.under_odds ?? 0,
         ev: underEV,
         user_prob: probs.under,
         correlation_key: row.match_id,

@@ -267,8 +267,8 @@ export async function getUnifiedMatchPlayerProps(matchId: string): Promise<Unifi
     return {
       match: {
         id: match.id,
-        home_team: match.home_team,
-        away_team: match.away_team,
+        home_team: match.home_team ?? '',
+        away_team: match.away_team ?? '',
         venue: match.venue,
         match_date: match.match_date,
         round: match.round,

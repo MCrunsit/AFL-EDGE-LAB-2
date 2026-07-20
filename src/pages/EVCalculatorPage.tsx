@@ -458,7 +458,7 @@ function calculateModelProb(
     venue_adjustment: venueAdjustment,
     opponent_adjustment: opponentAdjustment,
     tags,
-    context,
+    context: context ?? null,
     quality_score,
     risk_level,
     sampleWindow,
@@ -475,8 +475,8 @@ async function trackBet(row: EVRow, match: Match, sampleWindow: SampleWindow = '
     .from('tracked_bets')
     .select('id')
     .eq('result', 'pending')
-    .eq('player_id', row.player_id)
-    .eq('market', extractStatType(row.raw_market))
+    .eq('player_id', row.player_id ?? '')
+    .eq('market', extractStatType(row.raw_market) ?? '')
     .eq('odds_taken', row.over_odds)
     .maybeSingle();
 
@@ -1122,7 +1122,7 @@ export default function EVCalculatorPage() {
       // Opponent Edge - PLAYER-SPECIFIC: opponent is determined by player's team vs match teams
       // Compute from shared historical stats cache
       const opponentEdge = (useOpponentEdge && passesRealisticFilters && resolvedPlayerId && historicalStatsCache && statType)
-        ? getOpponentEdgeFromCache(historicalStatsCache, resolvedPlayerId, statType as StatType, playerTeam, matchHome, matchAway).result
+        ? getOpponentEdgeFromCache(historicalStatsCache, resolvedPlayerId, statType as StatType, playerTeam, matchHome ?? '', matchAway ?? '').result
         : null;
       const rawOppAdj = opponentEdge ? opponentEdge.edge_value : 0;
       const opponentEdgeAdjustment = capOpponentAdjustment(rawOppAdj);
@@ -1842,7 +1842,7 @@ export default function EVCalculatorPage() {
       .from('watchlist')
       .select('id')
       .eq('player_name', row.player_name)
-      .eq('market', extractStatType(row.raw_market))
+      .eq('market', extractStatType(row.raw_market) ?? '')
       .eq('line', row.line.toString())
       .maybeSingle();
 

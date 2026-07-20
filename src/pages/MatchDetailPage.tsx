@@ -101,7 +101,7 @@ function DebugPanel({
                       <td className="py-1.5 px-2 text-right text-gray-400 font-mono">{m.raw_line ?? '—'}</td>
                       <td className="py-1.5 px-2 text-right text-white font-mono">{m.line.toFixed(1)}</td>
                       <td className="py-1.5 px-2 text-right text-emerald-400 font-mono">{m.over_odds.toFixed(2)}</td>
-                      <td className="py-1.5 px-2 text-right text-red-400 font-mono">{m.under_odds.toFixed(2)}</td>
+                      <td className="py-1.5 px-2 text-right text-red-400 font-mono">{m.under_odds != null ? m.under_odds.toFixed(2) : '—'}</td>
                       <td className="py-1.5 px-2 text-right text-gray-500">{formatSyncAge(m.fetched_at)}</td>
                     </tr>
                   ))}

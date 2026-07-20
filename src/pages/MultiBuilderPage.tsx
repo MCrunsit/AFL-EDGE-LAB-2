@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Shield, Bookmark, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target } from 'lucide-react';
+import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Shield, Bookmark, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target, Link as LinkIcon } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { extractStatType } from '../lib/oddsNormalizer';
 import { formatPositionEdgeShortLabel, getPositionEdgeColor, formatPositionEdgeLabel, type PositionEdgeResult, type VenueEdgeResult, type OpponentEdgeResult } from '../lib/positionEdge';
@@ -528,11 +528,11 @@ export default function MultiBuilderPage() {
     let availableAfterExclusions = validLegs.length;
 
     evRows.forEach(r => {
-      const playerId = r.player_id;
+      const playerId = r.player_id ?? '';
       const statType = extractStatType(r.raw_market) || 'other';
 
       // Check manual exclusions
-      const isManuallyExcluded = isPlayerExcluded(playerId) || isPlayerStatExcluded(playerId, statType) || isMatchExcluded(r.match_id);
+      const isManuallyExcluded = isPlayerExcluded(playerId) || isPlayerStatExcluded(playerId, statType) || isMatchExcluded(r.match_id ?? '');
       if (isManuallyExcluded) excludedByUser++;
 
       // Check tag risk exclusions
@@ -1924,7 +1924,7 @@ export default function MultiBuilderPage() {
       <div className="mt-6 bg-gray-900 border border-cyan-500/20 rounded-xl p-4">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-cyan-400 font-semibold text-sm flex items-center gap-2">
-            <Link className="w-4 h-4" />
+            <LinkIcon className="w-4 h-4" />
             Relink Round Odds to Canonical Players
           </h3>
           <button
@@ -1932,7 +1932,7 @@ export default function MultiBuilderPage() {
             disabled={relinkLoading || selectedMatchIds.length === 0}
             className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-medium rounded-lg transition flex items-center gap-1.5"
           >
-            {relinkLoading ? <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Link className="w-3.5 h-3.5" />}
+            {relinkLoading ? <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <LinkIcon className="w-3.5 h-3.5" />}
             Relink Selected Matches
           </button>
         </div>

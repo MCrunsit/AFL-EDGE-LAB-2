@@ -233,7 +233,7 @@ export default function MissingStatsRepairPage() {
       // Refresh DB health + audit
       const health = await getDatabaseHealth();
       setDbHealth(health);
-      await runAudit();
+      await handleAudit();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Coverage completion failed');
     } finally {
@@ -258,7 +258,7 @@ export default function MissingStatsRepairPage() {
       );
       const total = missingEntries.length;
       if (total === 0) {
-        setFullBackfillProgress({ processed: 0, total: 0, statsInserted: 0, oddsRelinked: 0, errors: [] });
+        setFullBackfillProgress({ processed: 0, total: 0, statsInserted: 0, oddsRelinked: 0, alreadyFixed: 0, currentBatch: 0, errors: [] });
         setFullBackfillRunning(false);
         return;
       }
@@ -343,7 +343,7 @@ export default function MissingStatsRepairPage() {
               setFullBackfillBatchResults(prev => [...prev, batchResult]);
 
               // Auto-pause if rate limit low
-              if (batchResult.rateLimitRemaining !== null && batchResult.rateLimitRemaining < 20) {
+              if (batchResult.rateLimitRemaining != null && batchResult.rateLimitRemaining < 20) {
                 allErrors.push(`Auto-paused — rate limit low (${batchResult.rateLimitRemaining} remaining)`);
                 setFullBackfillPaused(true);
               }
@@ -377,7 +377,7 @@ export default function MissingStatsRepairPage() {
         // Re-audit every 10 batches (not every batch)
         if (batchCount % 10 === 0 && !fullBackfillAbortRef.current) {
           try {
-            await runAudit();
+            await handleAudit();
             const health = await getDatabaseHealth();
             setDbHealth(health);
           } catch {
@@ -390,13 +390,13 @@ export default function MissingStatsRepairPage() {
       if (failedBatches.length > 0) {
         const names = failedBatches.flatMap(fb => fb.batch.map(p => p.bookmaker_player_name));
         allErrors.push(`${failedBatches.length} batches failed permanently. ${names.length} players still pending: ${names.slice(0, 10).join(', ')}${names.length > 10 ? '...' : ''}`);
-        setFullBackfillProgress(prev => ({ ...prev, errors: [...allErrors] }));
+        setFullBackfillProgress(prev => prev ? { ...prev, errors: [...allErrors] } : prev);
       }
 
       // Final audit after all batches
       if (!fullBackfillAbortRef.current) {
         try {
-          await runAudit();
+          await handleAudit();
           const health = await getDatabaseHealth();
           setDbHealth(health);
         } catch {
@@ -872,7 +872,7 @@ export default function MissingStatsRepairPage() {
               {connTestResult.envCheck.rateLimitRemaining !== undefined && (
                 <div className="bg-gray-800/50 rounded-lg p-2 text-xs">
                   <span className="text-gray-500">Rate limit remaining: </span>
-                  <span className={connTestResult.envCheck.rateLimitRemaining < 50 ? 'text-amber-400' : 'text-emerald-400'}>
+                  <span className={connTestResult.envCheck.rateLimitRemaining != null && connTestResult.envCheck.rateLimitRemaining < 50 ? 'text-amber-400' : 'text-emerald-400'}>
                     {connTestResult.envCheck.rateLimitRemaining}
                   </span>
                 </div>

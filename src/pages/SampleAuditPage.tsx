@@ -9,6 +9,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Search, List, Loader2, AlertCircle, CheckCircle2, XCircle, BarChart3, AlertTriangle, HelpCircle, Link2, Wrench, ArrowRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import type { PlayerGameStat } from '../lib/types';
 import { getCanonicalPlayerGameLog, detectGameLogGaps, interleaveGaps, annotateGameLog, computeWindowCounts, type CanonicalStat, type CanonicalGameRow, type GameGap, type GapReason, type GameLogRowOrGap } from '../lib/canonicalGameLog';
 
 const STAT_OPTIONS: { value: CanonicalStat; label: string }[] = [
@@ -247,7 +248,9 @@ export default function SampleAuditPage() {
           };
           const { error: insertError } = await supabase
             .from('player_game_stats')
-            .upsert(insertData, { onConflict: 'player_id,match_id' });
+            // insertData is assembled from loosely-typed raw_kali staging rows;
+            // cast preserves the existing promotion behaviour.
+            .upsert(insertData as unknown as PlayerGameStat, { onConflict: 'player_id,match_id' });
           if (!insertError) promoted++;
         }
         setRepairResult({

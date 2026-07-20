@@ -177,10 +177,10 @@ export async function loadTeamDisposalStats(season = 2026): Promise<{ stats: Tea
     const awayNorm = normalizeTeam(m.away_team);
     matchAggregation.set(m.id, {
       matchId: m.id,
-      matchDate: m.match_date,
-      round: m.round,
-      homeTeam: homeNorm ?? m.home_team,
-      awayTeam: awayNorm ?? m.away_team,
+      matchDate: m.match_date ?? '',
+      round: m.round ?? '',
+      homeTeam: homeNorm ?? m.home_team ?? '',
+      awayTeam: awayNorm ?? m.away_team ?? '',
       venue: m.venue ?? '',
       teamTotals: new Map(),
       playerCounts: new Map(),
@@ -223,7 +223,7 @@ export async function loadTeamDisposalStats(season = 2026): Promise<{ stats: Tea
 
   const diag: TeamStatsDiagnostics = emptyDiagnostics();
   const today = new Date().toISOString().split('T')[0];
-  diag.totalCompletedMatches = matches.filter(m => m.match_date < today).length;
+  diag.totalCompletedMatches = matches.filter(m => m.match_date != null && m.match_date < today).length;
 
   for (const [matchId, matchInfo] of matchAggregation) {
     const teams = Array.from(matchInfo.teamTotals.keys());
@@ -401,8 +401,8 @@ export async function buildTeamEnvironmentMap(
   const matchups: TeamMatchupEnvironment[] = [];
 
   for (const m of upcomingMatches) {
-    const homeNorm = normalizeTeam(m.home_team) ?? m.home_team;
-    const awayNorm = normalizeTeam(m.away_team) ?? m.away_team;
+    const homeNorm = normalizeTeam(m.home_team) ?? m.home_team ?? '';
+    const awayNorm = normalizeTeam(m.away_team) ?? m.away_team ?? '';
     const homeStats = statsByTeam.get(homeNorm);
     const awayStats = statsByTeam.get(awayNorm);
     if (!homeStats || !awayStats) continue;
