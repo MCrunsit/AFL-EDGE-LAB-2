@@ -407,7 +407,7 @@ function isDuplicateLadder(a: PullEmLeg, b: PullEmLeg): boolean {
   return a.selectionType === 'ladder' && b.selectionType === 'ladder';
 }
 
-function hasConflict(a: PullEmLeg, b: PullEmLeg): boolean {
+export function hasConflict(a: PullEmLeg, b: PullEmLeg): boolean {
   // Only one disposal leg per player — reject all same-player combos
   if (a.playerId !== '' && a.playerId === b.playerId) return true;
   if (isDuplicateLadder(a, b)) return true;

@@ -726,5 +726,12 @@ export async function getModelledBookmakerOddsForMatch(
     lastRefreshed: new Date(),
   };
 
-  return { rows: modelledRows, coverage, match };
+  // WRONG_TEAM rows are counted in `coverage` for diagnostics above, but must
+  // never reach callers building legs/recommendations — a player who isn't on
+  // either team in this match can't be eligible no matter what else is true
+  // about the row (this was the root cause of wrong-match player leakage
+  // into Best Individual Legs, multis, and related builders).
+  const eligibleRows = modelledRows.filter(r => r.modelStatus !== 'WRONG_TEAM');
+
+  return { rows: eligibleRows, coverage, match };
 }

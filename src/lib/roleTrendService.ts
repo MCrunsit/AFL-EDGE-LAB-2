@@ -23,12 +23,26 @@ export interface RoleTrendEntry {
   playerId: string;
   playerName: string;
   team: string;
+  sampleSize: number;
+  latestRound: string | null;
+  latestCba: number | null;
+  latestKickInCount: number | null;
+  latestKickInShare: number | null;
+  latestUpdatedAt: string | null;
   cbaSeasonAvg: number;
+  cbaLast10: number;
   cbaLast5: number;
   cbaLast3: number;
   kickInSeasonShare: number;
+  kickInLast10Share: number;
   kickInLast5Share: number;
   kickInLast3Share: number;
+  /** Aggregate (sum play-ons / sum kick-ins) over the window — null when the
+   * window has zero genuine kick-ins to compute a percentage from. */
+  kickInPlayOnPctSeason: number | null;
+  kickInPlayOnPctLast10: number | null;
+  kickInPlayOnPctLast5: number | null;
+  kickInPlayOnPctLast3: number | null;
   cbaChange: number;
   kickInChange: number;
   trendLabel: RoleTrendLabel;
@@ -132,25 +146,43 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
     });
   }
 
+  const avg = (records: PlayerRoleData[], pick: (r: PlayerRoleData) => number) =>
+    records.length > 0 ? records.reduce((acc, r) => acc + pick(r), 0) / records.length : 0;
+
+  /** Aggregate play-on percentage over a window: sum(play-ons) / sum(kick-ins).
+   * Never averages per-match percentages (which breaks down on 0-kick-in
+   * matches) and returns null rather than 0 when the window has no genuine
+   * kick-ins to compute from. */
+  const playOnPct = (records: PlayerRoleData[]): number | null => {
+    const totalKickIns = records.reduce((acc, r) => acc + r.kickInCount, 0);
+    if (totalKickIns <= 0) return null;
+    const totalPlayOns = records.reduce((acc, r) => acc + r.kickInPlayOnCount, 0);
+    return totalPlayOns / totalKickIns;
+  };
+
   const result: RoleTrendMap = new Map();
   for (const [playerId, records] of byPlayer) {
     const sorted = records.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
     const seasonRecords = sorted;
+    const last10 = sorted.slice(0, 10);
     const last5 = sorted.slice(0, 5);
     const last3 = sorted.slice(0, 3);
 
-    const cbaSeasonAvg = seasonRecords.reduce((acc, r) => acc + r.cbaPercentage, 0) / Math.max(1, seasonRecords.length);
-    const cbaLast5 = last5.reduce((acc, r) => acc + r.cbaPercentage, 0) / Math.max(1, last5.length);
-    const cbaLast3 = last3.reduce((acc, r) => acc + r.cbaPercentage, 0) / Math.max(1, last3.length);
+    const cbaSeasonAvg = avg(seasonRecords, r => r.cbaPercentage);
+    const cbaLast10 = avg(last10, r => r.cbaPercentage);
+    const cbaLast5 = avg(last5, r => r.cbaPercentage);
+    const cbaLast3 = avg(last3, r => r.cbaPercentage);
 
-    const kickInSeasonShare = seasonRecords.reduce((acc, r) => acc + r.kickInShare, 0) / Math.max(1, seasonRecords.length);
-    const kickInLast5Share = last5.reduce((acc, r) => acc + r.kickInShare, 0) / Math.max(1, last5.length);
-    const kickInLast3Share = last3.reduce((acc, r) => acc + r.kickInShare, 0) / Math.max(1, last3.length);
+    const kickInSeasonShare = avg(seasonRecords, r => r.kickInShare);
+    const kickInLast10Share = avg(last10, r => r.kickInShare);
+    const kickInLast5Share = avg(last5, r => r.kickInShare);
+    const kickInLast3Share = avg(last3, r => r.kickInShare);
 
     const cbaChange = cbaLast3 - cbaSeasonAvg;
     const kickInChange = kickInLast3Share - kickInSeasonShare;
 
-    const hasData = seasonRecords.length > 0;
+    // Never classify a strong trend from fewer than three genuine matches.
+    const hasData = seasonRecords.length >= 3;
     const trendLabel = getTrendLabel(cbaChange, kickInChange, hasData);
     const confidence = getConfidence(seasonRecords.length);
     const adjustment = adjustmentFromTrend(trendLabel);
@@ -160,12 +192,24 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
       playerId,
       playerName: '',
       team: '',
+      sampleSize: seasonRecords.length,
+      latestRound: first ? (first.round || null) : null,
+      latestCba: first ? first.cbaPercentage : null,
+      latestKickInCount: first ? first.kickInCount : null,
+      latestKickInShare: first ? first.kickInShare : null,
+      latestUpdatedAt: first ? (first.updatedAt || null) : null,
       cbaSeasonAvg,
+      cbaLast10,
       cbaLast5,
       cbaLast3,
       kickInSeasonShare,
+      kickInLast10Share,
       kickInLast5Share,
       kickInLast3Share,
+      kickInPlayOnPctSeason: playOnPct(seasonRecords),
+      kickInPlayOnPctLast10: playOnPct(last10),
+      kickInPlayOnPctLast5: playOnPct(last5),
+      kickInPlayOnPctLast3: playOnPct(last3),
       cbaChange,
       kickInChange,
       trendLabel,
@@ -206,10 +250,10 @@ ALTER TABLE player_role_data ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "select_role_data" ON player_role_data FOR SELECT
   TO anon, authenticated USING (true);
-CREATE POLICY "insert_role_data" ON player_role_data FOR INSERT
-  TO authenticated WITH CHECK (true);
-CREATE POLICY "update_role_data" ON player_role_data FOR UPDATE
-  TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "anon_insert_role_data" ON player_role_data FOR INSERT
+  TO anon, authenticated WITH CHECK (true);
+CREATE POLICY "anon_update_role_data" ON player_role_data FOR UPDATE
+  TO anon, authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "delete_role_data" ON player_role_data FOR DELETE
   TO authenticated USING (true);
 `;

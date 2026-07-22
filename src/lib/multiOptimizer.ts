@@ -157,7 +157,7 @@ function getPositionEdgeLabel(row: ModelledOddsRow): string | null {
   return `${val} ${sigLabel} ${direction}${vs}`;
 }
 
-function rowToLeg(
+export function rowToLeg(
   row: ModelledOddsRow,
   matchName: string,
   teamEnv?: TeamEnvironmentMap,
@@ -194,7 +194,7 @@ function rowToLeg(
   };
 }
 
-function applyCorrelationHaircut(legs: OptimizerLeg[], rawProb: number): number {
+export function applyCorrelationHaircut(legs: { matchId: string }[], rawProb: number): number {
   const matchCounts = new Map<string, number>();
   for (const leg of legs) matchCounts.set(leg.matchId, (matchCounts.get(leg.matchId) ?? 0) + 1);
 
@@ -383,6 +383,60 @@ function isDuplicateMulti(a: OptimizedMulti, b: OptimizedMulti): boolean {
   if (aIds.size !== bIds.size) return false;
   for (const id of aIds) if (!bIds.has(id)) return false;
   return true;
+}
+
+export interface CustomMultiResult {
+  legs: OptimizerLeg[];
+  legCount: number;
+  combinedOdds: number;
+  rawProbability: number;
+  conservativeProbability: number;
+  estimatedEV: number;
+  weakestLegProb: number;
+  hasSameMatchLegs: boolean;
+  warnings: string[];
+}
+
+/**
+ * Combine an arbitrary, user-picked set of legs into a multi.
+ * Unlike buildCandidate/finalizeMulti, this has no fixed leg-count or
+ * preset-driven constraints — it just prices whatever the user selected.
+ */
+export function buildCustomMulti(legs: OptimizerLeg[]): CustomMultiResult | null {
+  if (legs.length === 0) return null;
+
+  const playerIds = new Set(legs.map(l => l.playerId));
+  if (playerIds.size !== legs.length) return null;
+
+  const combinedOdds = legs.reduce((product, leg) => product * leg.odds, 1);
+  const rawProbability = legs.reduce((product, leg) => product * leg.adjustedProb, 1);
+  const conservativeProbability = applyCorrelationHaircut(legs, rawProbability);
+  const estimatedEV = conservativeProbability * combinedOdds - 1;
+  const weakestLegProb = Math.min(...legs.map(l => l.adjustedProb));
+
+  const matchCounts = new Map<string, number>();
+  for (const leg of legs) matchCounts.set(leg.matchId, (matchCounts.get(leg.matchId) ?? 0) + 1);
+  const hasSameMatchLegs = matchCounts.size < legs.length;
+
+  const warnings: string[] = [];
+  if (hasSameMatchLegs) {
+    warnings.push('Legs from the same match are not fully independent — this probability may be overstated.');
+  }
+  for (const leg of legs) {
+    if (leg.riskLevel === 'High') warnings.push(`${leg.playerName} is flagged High risk`);
+  }
+
+  return {
+    legs,
+    legCount: legs.length,
+    combinedOdds,
+    rawProbability,
+    conservativeProbability,
+    estimatedEV,
+    weakestLegProb,
+    hasSameMatchLegs,
+    warnings,
+  };
 }
 
 function yieldToBrowser(): Promise<void> {

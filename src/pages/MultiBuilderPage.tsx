@@ -1,9 +1,9 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Shield, Bookmark, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target, Link as LinkIcon } from 'lucide-react';
+import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Shield, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target, Link as LinkIcon } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { extractStatType } from '../lib/oddsNormalizer';
-import { formatPositionEdgeShortLabel, getPositionEdgeColor, formatPositionEdgeLabel, type PositionEdgeResult, type VenueEdgeResult, type OpponentEdgeResult } from '../lib/positionEdge';
+import { getPositionEdgeColor, type PositionEdgeResult, type VenueEdgeResult, type OpponentEdgeResult } from '../lib/positionEdge';
 import { checkDuplicateMulti } from '../lib/betTracking';
 import { getDataStatus } from '../lib/playerStatsSync';
 import { getActiveBettingSlate, getRoundInfo, getMatchesForRound, type RoundInfo } from '../lib/roundManager';
@@ -101,7 +101,13 @@ export default function MultiBuilderPage() {
   } | null>(null);
   const [targetOdds, setTargetOdds] = useState('2.00');
   const [manualLegs, setManualLegs] = useState<MultiLeg[]>([]);
-  const [candidates, setCandidates] = useState<MultiCandidate[]>([]);
+  // Live counts reported up by MultiOptimizerPanel — the single source of truth for
+  // "how many recommended multis / eligible legs are actually on screen right now".
+  // Diagnostics below reads this instead of a separate, disconnected calculation.
+  const [panelResult, setPanelResult] = useState({ poolSize: 0, multiCount: 0, customLegsAvailable: 0 });
+  const handlePanelResultsChange = useCallback((info: { poolSize: number; multiCount: number; customLegsAvailable: number }) => {
+    setPanelResult(info);
+  }, []);
   const [showAdvancedDiagnostics, setShowAdvancedDiagnostics] = useState(false);
   const [lineSafety, setLineSafety] = useState<LineSafetyMode>('safe');
   const [selectedGameMatchId, setSelectedGameMatchId] = useState<string | null>(null);
@@ -198,7 +204,6 @@ export default function MultiBuilderPage() {
       setMaxLegsPerMatch(2);
     }
     setManualLegs([]);
-    setCandidates([]);
   }
 
   // Exclusion helper functions
@@ -369,15 +374,21 @@ export default function MultiBuilderPage() {
           useOpponentEdge,
         }))
       );
+      // `r.rows` has WRONG_TEAM rows already excluded (getModelledBookmakerOddsForMatch
+      // filters them out so they can never leak into legs/recommendations) — so counts
+      // like wrongTeam and totalOddsRows must come from each match's own `coverage`
+      // (computed before that filter), not be re-derived from the filtered rows.
       const allRows = results.flatMap(r => r.rows);
+      const sumCoverage = (key: keyof ModelCoverage) =>
+        results.reduce((sum, r) => sum + (r.coverage[key] as number), 0);
       const totalCoverage: ModelCoverage = {
-        totalOddsRows: allRows.length,
-        modelReady: allRows.filter(r => r.modelStatus === 'MODEL_READY').length,
-        oddsOnly: allRows.filter(r => r.modelStatus === 'ODDS_ONLY').length,
-        noStats: allRows.filter(r => r.modelStatus === 'NO_STATS').length,
-        insufficientSample: allRows.filter(r => r.modelStatus === 'INSUFFICIENT_MARKET_SAMPLE').length,
-        wrongTeam: allRows.filter(r => r.modelStatus === 'WRONG_TEAM').length,
-        unresolvedPlayer: allRows.filter(r => r.modelStatus === 'PLAYER_UNRESOLVED').length,
+        totalOddsRows: sumCoverage('totalOddsRows'),
+        modelReady: sumCoverage('modelReady'),
+        oddsOnly: sumCoverage('oddsOnly'),
+        noStats: sumCoverage('noStats'),
+        insufficientSample: sumCoverage('insufficientSample'),
+        wrongTeam: sumCoverage('wrongTeam'),
+        unresolvedPlayer: sumCoverage('unresolvedPlayer'),
         modelReadyPlayers: new Set(allRows.filter(r => r.modelStatus === 'MODEL_READY' && r.resolvedPlayerId).map(r => r.resolvedPlayerId!)).size,
         lastRefreshed: new Date(),
       };
@@ -489,20 +500,24 @@ export default function MultiBuilderPage() {
     return filtered;
   }, [evRows, minSample, minHits, maxOdds, minAdjustedProb, minAdjustedEV, avoidWeakVenue, avoidWeakOpponent, allowedRiskLevels, includeUnknownPosition, hidePositionSuppressions, verySignificantOnly, preferPositionBoosts, includeUnknownMatchup, hideMatchupSuppressions, hideSmallSampleMatchup, preferMatchupBoosts, exclusions, avoidHighTagRisk, avoidModerateTagRisk, selectedMarkets, normalizeMarket]);
 
-  // Disposal line recommendations (lightweight — no combination search)
-  // Apply per-match player exclusions before building recommendations
+  // Disposal line recommendations feed Best Individual Legs, Recommended Multis and
+  // Build Your Own Multi (via MultiOptimizerPanel below). They are built from validLegs —
+  // the SAME fully-filtered pool the top settings panel and diagnostics use — so every
+  // top-level filter (sample/hits/odds/prob/EV/venue/opponent/risk/position/matchup/market/
+  // exclusions/tag-risk) actually controls what shows up below. Do not source this from raw
+  // modelledRows again — that reintroduces the two-pipeline bug this was fixed for.
   const disposalRecommendations = useMemo(() => {
     const excludedIds = selectedGameMatchId
       ? getExcludedPlayerIds(selectedGameMatchId)
       : new Set<string>();
     const filteredRows = excludedIds.size > 0
-      ? modelledRows.filter(r => {
+      ? validLegs.filter(r => {
           const pid = r.player_id ?? r.resolvedPlayerId ?? '';
           return !excludedIds.has(pid);
         })
-      : modelledRows;
+      : validLegs;
     return buildDisposalLineRecommendations(filteredRows, getCriteriaForMode(lineSafety));
-  }, [modelledRows, lineSafety, selectedGameMatchId]);
+  }, [validLegs, lineSafety, selectedGameMatchId]);
 
   // Match names map for the optimizer panel
   const matchNames = useMemo(() => {
@@ -546,9 +561,11 @@ export default function MultiBuilderPage() {
       excludedByUser,
       excludedByTagRisk,
       availableAfterExclusions,
-      totalCandidates: candidates.length,
+      // Real count of multis currently rendered by the builder below — reported up via
+      // onResultsChange — not a separate, never-triggered calculation.
+      totalCandidates: panelResult.multiCount,
     };
-  }, [evRows, exclusions, avoidHighTagRisk, avoidModerateTagRisk, validLegs.length, candidates.length]);
+  }, [evRows, exclusions, avoidHighTagRisk, avoidModerateTagRisk, validLegs.length, panelResult.multiCount]);
 
   const statsSummary = useMemo(() => ({
     total: modelledRows.length,
@@ -576,117 +593,6 @@ export default function MultiBuilderPage() {
       !r.isWrongTeam
     ).sort((a, b) => (a.player_name ?? '').localeCompare(b.player_name ?? ''));
   }, [evRows]);
-
-  function buildCandidates() {
-    const target = parseFloat(targetOdds) || 2.5;
-    const legs: MultiLeg[] = validLegs.map(row => ({
-      row,
-      odds: row.over_odds,
-      evPercent: row.adjustedEV || 0,
-      modelProb: row.modelProb.adjustedProb || 0.5,
-      playerKey: row.player_id || row.player_name,
-      statKey: extractStatType(row.raw_market) || 'other',
-      matchId: row.match_id,
-      positionGroup: row.positionGroup,
-      positionEdge: row.positionEdge,
-      positionEdgeAdjustment: row.positionEdgeAdjustment,
-      venueEdge: row.venueEdge,
-      venueEdgeAdjustment: row.venueEdgeAdjustment,
-      opponentEdge: row.opponentEdge,
-      opponentEdgeAdjustment: row.opponentEdgeAdjustment,
-      totalMatchupAdjustment: row.totalMatchupAdjustment,
-      finalProbability: (usePositionEdge || useVenueEdge || useOpponentEdge) ? row.finalProbability : row.modelProb.adjustedProb,
-      finalEV: (usePositionEdge || useVenueEdge || useOpponentEdge) ? row.finalEV : row.adjustedEV,
-    }));
-
-    const results: MultiCandidate[] = [];
-    const used = new Set<string>();
-
-    for (const leg of legs) {
-      if (results.length >= 10) break;
-
-      const multiLegs: MultiLeg[] = [leg];
-      let combinedOdds = leg.odds;
-      let combinedProb = leg.modelProb;
-      const usedPlayers = new Set<string>();
-      const usedMatch = new Map<string, number>();
-      usedPlayers.add(leg.playerKey);
-      usedMatch.set(leg.matchId, 1);
-
-      // Get available legs
-      const availableLegs = legs.filter(l => {
-        if (!allowSamePlayer && l.playerKey === leg.playerKey) return false;
-        // Block same player + same stat ladder duplicates
-        if (l.playerKey === leg.playerKey && l.statKey === leg.statKey) return false;
-        const currentMatchCount = usedMatch.get(l.matchId) || 0;
-        if (!allowSameMatch && l.matchId !== leg.matchId) return preferDifferentMatches;
-        if (currentMatchCount >= effectiveMaxLegsPerMatch) return false;
-        return true;
-      });
-
-      for (const nextLeg of availableLegs) {
-        if (multiLegs.length >= 5) break;
-
-        if (!allowSamePlayer && usedPlayers.has(nextLeg.playerKey)) continue;
-        // Block same player + same stat ladder duplicates
-        if (usedPlayers.has(nextLeg.playerKey) && multiLegs.some(l => l.playerKey === nextLeg.playerKey && l.statKey === nextLeg.statKey)) continue;
-
-        const matchCount = usedMatch.get(nextLeg.matchId) || 0;
-        if (!allowSameMatch && matchCount > 0) continue;
-        if (matchCount >= effectiveMaxLegsPerMatch) continue;
-
-        multiLegs.push(nextLeg);
-        usedPlayers.add(nextLeg.playerKey);
-        usedMatch.set(nextLeg.matchId, matchCount + 1);
-        combinedOdds *= nextLeg.odds;
-        combinedProb *= nextLeg.modelProb;
-
-        if (combinedOdds >= target * 0.85 && combinedOdds <= target * 1.2) break;
-      }
-
-      if (multiLegs.length >= 2 && combinedOdds >= target * 0.75 && combinedOdds <= target * 1.5) {
-        const probValues = multiLegs.map(l => usePositionEdge ? (l.finalProbability ?? l.modelProb ?? 0) : (l.modelProb ?? 0));
-        const combined_model_prob = probValues.reduce((a, b) => a * b, 1);
-        const combined_ev = combined_model_prob * combinedOdds - 1;
-        const warnings: string[] = [];
-
-        // Same-match warning
-        if (!allowSameMatch) {
-          const matchCount = usedMatch.get(leg.matchId) || 0;
-          for (const [, count] of usedMatch) {
-            if (count >= 2) warnings.push(`${count} legs from same match`);
-          }
-        } else {
-          warnings.push('Same-match legs may be correlated. EV estimate may be overstated.');
-        }
-
-        // Context warnings
-        let hasWeakVenue = false, hasWeakOpp = false;
-        for (const l of multiLegs) {
-          if (l.row.modelProb.venue_adjustment < -0.03) hasWeakVenue = true;
-          if (l.row.modelProb.opponent_adjustment < -0.03) hasWeakOpp = true;
-        }
-        if (hasWeakVenue) warnings.push('Weak venue leg');
-        if (hasWeakOpp) warnings.push('Weak opponent leg');
-
-        // Quality score
-        const avgRisk = multiLegs.reduce((sum, l) => {
-          const scores = { Low: 100, Medium: 70, High: 40 };
-          return sum + scores[l.row.modelProb.risk_level];
-        }, 0) / multiLegs.length;
-
-        const quality_score = avgRisk;
-
-        const multiKey = multiLegs.map(l => l.row.id).sort().join(',');
-        if (!used.has(multiKey)) {
-          used.add(multiKey);
-          results.push({ legs: multiLegs, combined_odds: combinedOdds, combined_model_prob: combined_model_prob, combined_ev, warnings, quality_score });
-        }
-      }
-    }
-
-    setCandidates(results.sort((a, b) => b.quality_score - a.quality_score).slice(0, 10));
-  }
 
   // Valid Leg Funnel computation
   const legFunnel = useMemo(() => {
@@ -1541,7 +1447,9 @@ export default function MultiBuilderPage() {
           onLineSafetyChange={setLineSafety}
           teamEnvMap={teamEnvMap}
           teamMatchups={teamMatchups}
+          teamStats={teamStats}
           roleTrends={roleTrends}
+          onResultsChange={handlePanelResultsChange}
         />
       )}
 
@@ -2005,114 +1913,12 @@ export default function MultiBuilderPage() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Candidates */}
+      <div className="grid grid-cols-1 gap-6">
+        {/* Manual Picker — cross-match manual builder, separate from the per-match
+            Build Your Own Multi inside the Game/Round Multi Builder above. Kept as-is
+            for tonight; candidate for consolidation in a future pass. */}
         <div className="space-y-4">
-          <h3 className="text-white font-semibold text-sm">Suggested Multis ({candidates.length})</h3>
-          {loading ? (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-gray-500 text-sm">Loading...</div>
-          ) : candidates.length === 0 ? (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-gray-500 text-sm">
-              {validLegs.length < 2 ? 'Not enough realistic legs. Lower filters.' : 'Click Build Multis'}
-            </div>
-          ) : (
-            <>
-            {usePositionEdge && validLegs.every(l => l.positionEdgeAdjustment === 0) && (
-              <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mb-3">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                Position Edge is ON but no multi legs are being adjusted. Check position_edges table, player mappings, stat type, and opponent matching.
-              </div>
-            )}
-            {(usePositionEdge || useVenueEdge || useOpponentEdge) && validLegs.every(l => l.totalMatchupAdjustment === 0) && (
-              <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mb-3">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                Matchup toggles are ON but no multi legs are being adjusted. Check data coverage and matching.
-              </div>
-            )}
-            {candidates.map((c, i) => (
-              <div key={i} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-                <div className="px-4 py-3 bg-gray-800/40 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="text-white font-bold font-mono">{c.combined_odds.toFixed(2)}x</span>
-                    <span className={`text-xs font-bold ${c.combined_ev > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {(usePositionEdge || useVenueEdge || useOpponentEdge) ? 'Final EV' : 'EV'}: +{((c.combined_ev ?? 0) * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500">{c.legs.length} legs</span>
-                    <span className="text-xs text-blue-400">Q:{c.quality_score.toFixed(0)}</span>
-                    <button onClick={() => trackMulti(c)} className="p-1.5 bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30" title="Track Multi">
-                      <Bookmark className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-                <div className="p-3 space-y-1">
-                  {c.legs.map((leg, li) => (
-                    <div key={li} className="flex items-center gap-2 text-xs group">
-                      <span className="text-white font-medium truncate">{leg.row.player_name}</span>
-                      <span className="text-amber-300 font-mono">{leg.statKey} {leg.row.display_label}</span>
-                      <span className="text-gray-400 font-mono ml-auto">{leg.odds.toFixed(2)}</span>
-                      <span className={`px-1 py-0.5 rounded text-xs ${leg.row.modelProb.risk_level === 'Low' ? 'bg-emerald-500/20 text-emerald-400' : leg.row.modelProb.risk_level === 'Medium' ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
-                        {leg.row.modelProb.risk_level}
-                      </span>
-                      {usePositionEdge && (
-                        <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-medium ${getPositionEdgeColor(leg.positionEdge)}`} title={formatPositionEdgeShortLabel(leg.positionEdge, leg.positionGroup)}>
-                          {leg.positionGroup === 'UNKNOWN' ? 'UNKNOWN' : formatPositionEdgeLabel(leg.positionEdge)}
-                        </span>
-                      )}
-                      {usePositionEdge && leg.positionEdgeAdjustment !== 0 && (
-                        <span className={`text-[10px] font-bold ${leg.positionEdgeAdjustment > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {leg.positionEdgeAdjustment > 0 ? '+' : ''}{(leg.positionEdgeAdjustment * 100).toFixed(1)}%
-                        </span>
-                      )}
-                      {usePositionEdge && leg.positionEdge && leg.positionEdge.edge_value < 0 && (
-                        <AlertTriangle className="w-3 h-3 text-amber-400" />
-                      )}
-                      {(useVenueEdge || useOpponentEdge) && leg.venueEdgeAdjustment !== 0 && (
-                        <span className={`text-[10px] font-bold ${leg.venueEdgeAdjustment > 0 ? 'text-blue-400' : 'text-red-400'}`}>
-                          Venue: {leg.venueEdgeAdjustment > 0 ? '+' : ''}{(leg.venueEdgeAdjustment * 100).toFixed(1)}%
-                        </span>
-                      )}
-                      {(useVenueEdge || useOpponentEdge) && leg.opponentEdgeAdjustment !== 0 && (
-                        <span className={`text-[10px] font-bold ${leg.opponentEdgeAdjustment > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          Opp: {leg.opponentEdgeAdjustment > 0 ? '+' : ''}{(leg.opponentEdgeAdjustment * 100).toFixed(1)}%
-                        </span>
-                      )}
-                      {(useVenueEdge || useOpponentEdge) && leg.totalMatchupAdjustment !== 0 && (
-                        <span className={`text-[10px] font-bold ${leg.totalMatchupAdjustment > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          Total: {leg.totalMatchupAdjustment > 0 ? '+' : ''}{(leg.totalMatchupAdjustment * 100).toFixed(1)}%
-                        </span>
-                      )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const team = leg.row.playerTeam || '';
-                          excludePlayer(leg.row.player_id || leg.playerKey, leg.row.player_name, team);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1 text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded transition"
-                        title="Exclude Player"
-                      >
-                        <UserX className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                {c.warnings.length > 0 && (
-                  <div className="px-4 py-2 border-t border-gray-700/40 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/5">
-                    <AlertTriangle className="w-3 h-3 shrink-0" />
-                    {c.warnings.join(' · ')}
-                  </div>
-                )}
-              </div>
-            ))
-            }
-            </>
-          )}
-        </div>
-
-        {/* Manual Picker */}
-        <div className="space-y-4">
-          <h3 className="text-white font-semibold text-sm">Manual Multi</h3>
+          <h3 className="text-white font-semibold text-sm">Manual Multi (cross-match)</h3>
           {manualLegs.length > 0 && (
             <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
               <div className="px-4 py-3 bg-gray-800/40 flex items-center justify-between">
