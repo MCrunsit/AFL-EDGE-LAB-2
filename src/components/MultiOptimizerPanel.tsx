@@ -26,6 +26,8 @@ interface Props {
   teamEnvMap?: TeamEnvironmentMap;
   teamMatchups?: TeamMatchupEnvironment[];
   roleTrends?: RoleTrendMap;
+  /** Reports this panel's live counts up so the page-level diagnostics can show real, reconciled totals instead of a separate stale pipeline. */
+  onResultsChange?: (info: { poolSize: number; multiCount: number; customLegsAvailable: number }) => void;
 }
 
 function LegRow({ leg, index }: { leg: MultiCandidate['legs'][number]; index: number }) {
@@ -81,6 +83,7 @@ function LegRow({ leg, index }: { leg: MultiCandidate['legs'][number]; index: nu
 export default function MultiOptimizerPanel({
   recommendations, matchNames, matches, selectedMatchId, onSelectMatch,
   statsRoundLabel, lineSafety, onLineSafetyChange, teamEnvMap, teamMatchups, roleTrends,
+  onResultsChange,
 }: Props) {
   const [mode, setMode] = useState<'gameMulti' | 'roundMulti'>('gameMulti');
   const [settings, setSettings] = useState<MultiOptimizerSettings>(GAME_MULTI_PRESET);
@@ -306,6 +309,14 @@ export default function MultiOptimizerPanel({
   }, []);
 
   const clearCustomLegs = useCallback(() => setCustomLegIds([]), []);
+
+  useEffect(() => {
+    onResultsChange?.({
+      poolSize: gameRecommendations.length,
+      multiCount: multis.length,
+      customLegsAvailable: customLegPool.length,
+    });
+  }, [gameRecommendations.length, multis.length, customLegPool.length, onResultsChange]);
 
   return (
     <div className="space-y-4">
