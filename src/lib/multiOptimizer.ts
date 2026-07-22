@@ -194,7 +194,7 @@ export function rowToLeg(
   };
 }
 
-export function applyCorrelationHaircut(legs: OptimizerLeg[], rawProb: number): number {
+export function applyCorrelationHaircut(legs: { matchId: string }[], rawProb: number): number {
   const matchCounts = new Map<string, number>();
   for (const leg of legs) matchCounts.set(leg.matchId, (matchCounts.get(leg.matchId) ?? 0) + 1);
 

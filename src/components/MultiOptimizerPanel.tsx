@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
-import { Target, Award, AlertCircle, Loader2, X, RefreshCw, ChevronDown, ChevronRight, Zap, AlertTriangle, Wrench, Check, Minus, TrendingUp, TrendingDown, UserX, Plus, ListPlus } from 'lucide-react';
-import type { MultiCandidate, OptimizerDiagnostics, OptimizerProgress, MultiOptimizerSettings, CancellationRef, OptimizerPreset, OptimizerLeg } from '../lib/multiOptimizer';
-import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, SAME_GAME_PRESET, rowToLeg, buildCustomMulti } from '../lib/multiOptimizer';
+import { Target, Award, AlertCircle, Loader2, X, RefreshCw, ChevronDown, ChevronRight, Zap, AlertTriangle, Wrench, Check, UserX, Search, ArrowUpDown, ListPlus, Info } from 'lucide-react';
+import type { MultiCandidate, OptimizerDiagnostics, OptimizerProgress, MultiOptimizerSettings, CancellationRef } from '../lib/multiOptimizer';
+import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, applyCorrelationHaircut } from '../lib/multiOptimizer';
 import type { DisposalLineRecommendation } from '../lib/disposalLineSelector';
 import type { LineSafetyMode } from '../lib/disposalLineSelector';
 import type { TeamEnvironmentMap, TeamMatchupEnvironment } from '../lib/teamStatsService';
@@ -9,10 +9,34 @@ import { getLabelDisplay } from '../lib/teamStatsService';
 import type { RoleTrendMap } from '../lib/roleTrendService';
 import { getTrendDisplay } from '../lib/roleTrendService';
 import type { Match } from '../lib/types';
+import type { ModelledOddsRow } from '../lib/modelResolver';
+import { getModelledBookmakerOddsForMatch } from '../lib/modelResolver';
+import { buildPullEmLegs, hasConflict, type PullEmLeg, type PullEmSettings } from '../lib/pullEmMultiOptimizer';
 import {
   getExcludedPlayers, excludePlayer, unexcludePlayer, clearExcludedPlayers,
   type ExcludedPlayer,
 } from '../lib/playerExclusions';
+
+const ALL_LINES_SETTINGS: PullEmSettings = {
+  marketFocus: 'disposals_only',
+  marketTypes: new Set(['ladder', 'over', 'under']),
+  minCombinedOdds: 0,
+  maxCombinedOdds: 1000,
+  minLegs: 1,
+  maxLegs: 20,
+  minHitRate: 0,
+  minModelConfidence: 0,
+  minExpectedValue: -1000,
+  confirmedPlayersOnly: false,
+  allowUnders: true,
+  generationMode: 'balanced',
+};
+
+type AltSortKey = 'safest' | 'ev' | 'prob' | 'odds' | 'season' | 'last5';
+
+function legKey(leg: PullEmLeg): string {
+  return `${leg.playerId}|${leg.selectionType}|${leg.line}`;
+}
 
 interface Props {
   recommendations: DisposalLineRecommendation[];
@@ -99,7 +123,6 @@ export default function MultiOptimizerPanel({
   const [excludedPlayers, setExcludedPlayers] = useState<ExcludedPlayer[]>([]);
   const [exclusionSearch, setExclusionSearch] = useState('');
   const [showExclusionPanel, setShowExclusionPanel] = useState(false);
-  const [customLegIds, setCustomLegIds] = useState<string[]>([]);
   const cancelRef = useRef<CancellationRef>({ cancelled: false });
 
   // Load saved exclusions when the selected match changes
@@ -109,7 +132,10 @@ export default function MultiOptimizerPanel({
     } else {
       setExcludedPlayers([]);
     }
-    setCustomLegIds([]);
+    setAltSelectedKeys([]);
+    setAltConflictMsg(null);
+    setAltSearch('');
+    setAltTeamFilter('');
   }, [selectedMatchId, mode]);
 
   function switchMode(newMode: 'gameMulti' | 'roundMulti') {
@@ -290,33 +316,142 @@ export default function MultiOptimizerPanel({
 
   const safeLineCount = gameRecommendations.filter(r => r.safeLine).length;
 
-  // Pool of pickable legs for the custom builder — same source as "Best Individual Disposal Legs"
-  const customLegPool = useMemo(() => {
-    return gameRecommendations
-      .filter(r => r.safeLine)
-      .map(r => rowToLeg(r.safeLine!, matchNames[r.matchId] ?? r.matchId, teamEnvMap, roleTrends));
-  }, [gameRecommendations, matchNames, teamEnvMap, roleTrends]);
+  // ── Alternate-line custom builder ──────────────────────────────────────
+  // Fetch every genuine bookmaker_odds row for the selected match (ladder + O/U),
+  // same call PullEmDisposalMultiPanel already uses. Never derives Under odds
+  // from Over odds — buildPullEmLegs only builds an under leg from a real
+  // under_odds value.
+  const [altLinesRows, setAltLinesRows] = useState<ModelledOddsRow[]>([]);
+  const [altLinesLoading, setAltLinesLoading] = useState(false);
 
-  const selectedCustomLegs = useMemo(() => {
-    const byId = new Map(customLegPool.map(l => [l.playerId, l]));
-    return customLegIds.map(id => byId.get(id)).filter((l): l is OptimizerLeg => Boolean(l));
-  }, [customLegPool, customLegIds]);
+  useEffect(() => {
+    if (mode !== 'gameMulti' || !selectedMatchId) {
+      setAltLinesRows([]);
+      return;
+    }
+    let cancelled = false;
+    setAltLinesLoading(true);
+    getModelledBookmakerOddsForMatch(selectedMatchId, { includeOULines: true })
+      .then(res => { if (!cancelled) setAltLinesRows(res.rows); })
+      .catch(() => { if (!cancelled) setAltLinesRows([]); })
+      .finally(() => { if (!cancelled) setAltLinesLoading(false); });
+    return () => { cancelled = true; };
+  }, [mode, selectedMatchId]);
 
-  const customMulti = useMemo(() => buildCustomMulti(selectedCustomLegs), [selectedCustomLegs]);
+  // Expand every fetched row into its selectable lines (ladder / over / under).
+  // No safety thresholds here — eligibility is decided at the player level
+  // below (must already be in the shared, top-filtered gameRecommendations
+  // pool), not re-filtered per line, so the user can see a player's full
+  // genuine ladder even if only one rung passed the top panel's filters.
+  const allLinesResult = useMemo(() => {
+    if (altLinesRows.length === 0) return null;
+    return buildPullEmLegs(altLinesRows, matchNames, ALL_LINES_SETTINGS, selectedMatchId);
+  }, [altLinesRows, matchNames, selectedMatchId]);
 
-  const toggleCustomLeg = useCallback((playerId: string) => {
-    setCustomLegIds(prev => prev.includes(playerId) ? prev.filter(id => id !== playerId) : [...prev, playerId]);
+  const eligiblePlayerIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const r of gameRecommendations) {
+      if (!r.safeLine) continue;
+      const pid = r.safeLine.player_id ?? r.safeLine.resolvedPlayerId ?? '';
+      if (pid) ids.add(pid);
+    }
+    return ids;
+  }, [gameRecommendations]);
+
+  const pickableLegs = useMemo(() => {
+    if (!allLinesResult) return [];
+    return allLinesResult.legs.filter(leg => {
+      if (!eligiblePlayerIds.has(leg.playerId)) return false;
+      if (excludedPlayerIds.has(leg.playerId)) return false;
+      return true;
+    });
+  }, [allLinesResult, eligiblePlayerIds, excludedPlayerIds]);
+
+  const [altSearch, setAltSearch] = useState('');
+  const [altTeamFilter, setAltTeamFilter] = useState('');
+  const [altSort, setAltSort] = useState<AltSortKey>('safest');
+  const [altSelectedKeys, setAltSelectedKeys] = useState<string[]>([]);
+  const [altConflictMsg, setAltConflictMsg] = useState<string | null>(null);
+
+  const altTeams = useMemo(() => {
+    return [...new Set(pickableLegs.map(l => l.team).filter(Boolean))].sort();
+  }, [pickableLegs]);
+
+  const altLinesFiltered = useMemo(() => {
+    let rows = pickableLegs;
+    if (altTeamFilter) rows = rows.filter(l => l.team === altTeamFilter);
+    if (altSearch.trim()) {
+      const q = altSearch.trim().toLowerCase();
+      rows = rows.filter(l => l.playerName.toLowerCase().includes(q));
+    }
+    const sorted = [...rows];
+    switch (altSort) {
+      case 'safest': sorted.sort((a, b) => b.modelProb - a.modelProb); break;
+      case 'ev': sorted.sort((a, b) => b.expectedValue - a.expectedValue); break;
+      case 'prob': sorted.sort((a, b) => b.modelProb - a.modelProb); break;
+      case 'odds': sorted.sort((a, b) => a.odds - b.odds); break;
+      case 'season': sorted.sort((a, b) => b.seasonHitRate - a.seasonHitRate); break;
+      case 'last5': sorted.sort((a, b) => b.last5HitRate - a.last5HitRate); break;
+    }
+    return sorted;
+  }, [pickableLegs, altTeamFilter, altSearch, altSort]);
+
+  const altSelectedLegs = useMemo(() => {
+    const byKey = new Map(pickableLegs.map(l => [legKey(l), l]));
+    return altSelectedKeys.map(k => byKey.get(k)).filter((l): l is PullEmLeg => Boolean(l));
+  }, [pickableLegs, altSelectedKeys]);
+
+  const toggleAltLeg = useCallback((leg: PullEmLeg) => {
+    const key = legKey(leg);
+    setAltSelectedKeys(prev => {
+      if (prev.includes(key)) {
+        setAltConflictMsg(null);
+        return prev.filter(k => k !== key);
+      }
+      const conflict = altSelectedLegs.find(existing => hasConflict(existing, leg));
+      if (conflict) {
+        setAltConflictMsg(
+          conflict.playerId === leg.playerId
+            ? `${leg.playerName} is already in your multi as ${conflict.displayLabel} — remove it first to pick a different line.`
+            : `${leg.displayLabel} conflicts with ${conflict.playerName} ${conflict.displayLabel} already in your multi.`
+        );
+        return prev;
+      }
+      setAltConflictMsg(null);
+      return [...prev, key];
+    });
+  }, [altSelectedLegs]);
+
+  const clearAltLegs = useCallback(() => {
+    setAltSelectedKeys([]);
+    setAltConflictMsg(null);
   }, []);
 
-  const clearCustomLegs = useCallback(() => setCustomLegIds([]), []);
+  const altMulti = useMemo(() => {
+    if (altSelectedLegs.length === 0) return null;
+    const combinedOdds = altSelectedLegs.reduce((p, l) => p * l.odds, 1);
+    const rawProbability = altSelectedLegs.reduce((p, l) => p * l.modelProb, 1);
+    const conservativeProbability = applyCorrelationHaircut(altSelectedLegs, rawProbability);
+    const estimatedEV = conservativeProbability * combinedOdds - 1;
+    const avgAdjustedProb = altSelectedLegs.reduce((s, l) => s + l.modelProb, 0) / altSelectedLegs.length;
+    const weakestLeg = altSelectedLegs.reduce((min, l) => (l.modelProb < min.modelProb ? l : min), altSelectedLegs[0]);
+    const highestRiskLeg = altSelectedLegs.find(l => l.riskLevel === 'High')
+      ?? altSelectedLegs.find(l => l.riskLevel === 'Medium')
+      ?? null;
+    const matchIds = new Set(altSelectedLegs.map(l => l.matchId));
+    return {
+      combinedOdds, rawProbability, conservativeProbability, estimatedEV, avgAdjustedProb,
+      weakestLeg, highestRiskLeg, hasSameMatchLegs: matchIds.size < altSelectedLegs.length,
+    };
+  }, [altSelectedLegs]);
 
   useEffect(() => {
     onResultsChange?.({
       poolSize: gameRecommendations.length,
       multiCount: multis.length,
-      customLegsAvailable: customLegPool.length,
+      customLegsAvailable: pickableLegs.length,
     });
-  }, [gameRecommendations.length, multis.length, customLegPool.length, onResultsChange]);
+  }, [gameRecommendations.length, multis.length, pickableLegs.length, onResultsChange]);
 
   return (
     <div className="space-y-4">
@@ -521,30 +656,15 @@ export default function MultiOptimizerPanel({
       {/* Section A — Best Individual Legs */}
       {gameRecommendations.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-white font-semibold text-sm">Best Individual Disposal Legs</h3>
-            <span className="text-[10px] text-gray-500">Click + to add a leg to your own multi below</span>
-          </div>
+          <h3 className="text-white font-semibold text-sm mb-3">Best Individual Disposal Legs</h3>
           <div className="space-y-2">
             {gameRecommendations.filter(r => r.safeLine).map((rec, i) => {
               const fr = rec.safeLine!.freshness;
               const isStale = fr && fr.freshnessStatus !== 'CURRENT';
-              const playerId = rec.safeLine!.resolvedPlayerId ?? rec.safeLine!.player_id ?? rec.safeLine!.player_name;
-              const isPicked = customLegIds.includes(playerId);
               return (
-                <div key={i} className={`py-2 border-b border-gray-800/30 last:border-0 ${isStale ? 'opacity-60' : ''} ${isPicked ? 'bg-emerald-500/5 -mx-2 px-2 rounded' : ''}`}>
+                <div key={i} className={`py-2 border-b border-gray-800/30 last:border-0 ${isStale ? 'opacity-60' : ''}`}>
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => toggleCustomLeg(playerId)}
-                        disabled={Boolean(isStale)}
-                        title={isStale ? 'Stale/unverified data — cannot add to custom multi' : isPicked ? 'Remove from your multi' : 'Add to your multi'}
-                        className={`w-5 h-5 flex items-center justify-center rounded transition shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
-                          isPicked ? 'bg-emerald-500 text-gray-950' : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
-                        }`}
-                      >
-                        {isPicked ? <Check className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
-                      </button>
                       <span className="text-gray-600 text-xs font-mono">{i + 1}</span>
                       <div>
                         <span className="text-white font-medium text-sm">{rec.playerName}</span>
@@ -575,59 +695,166 @@ export default function MultiOptimizerPanel({
         </div>
       )}
 
-      {/* Section A.5 — Build Your Own Multi */}
+      {/* Section A.5 — Build Your Own Multi (every genuine line, not just the safe pick) */}
       {gameRecommendations.length > 0 && (
         <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <div className="flex items-center gap-2">
               <ListPlus className="w-4 h-4 text-cyan-400" />
               <h3 className="text-white font-semibold text-sm">Build Your Own Multi</h3>
+              <span className="text-[10px] text-gray-500">
+                {altLinesLoading ? 'Loading all lines…' : `${pickableLegs.length} genuine lines from bookmaker odds`}
+              </span>
             </div>
-            {selectedCustomLegs.length > 0 && (
-              <button onClick={clearCustomLegs} className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-400 transition">
-                <X className="w-3 h-3" /> Clear ({selectedCustomLegs.length})
+            {altSelectedLegs.length > 0 && (
+              <button onClick={clearAltLegs} className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-400 transition">
+                <X className="w-3 h-3" /> Clear ({altSelectedLegs.length})
               </button>
             )}
           </div>
 
-          {selectedCustomLegs.length === 0 ? (
+          {allLinesResult && !allLinesResult.diagnostics.genuineUnderOddsAvailable && (
+            <div className="flex items-start gap-2 text-xs text-amber-400 bg-amber-500/10 rounded-lg p-2.5 mb-3">
+              <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>No genuine Over/Under odds are stored yet for this match — only ladder (N+) lines are available. Under legs will appear automatically once the bookmaker publishes them.</span>
+            </div>
+          )}
+
+          {/* Search / filter / sort */}
+          <div className="flex flex-wrap gap-2 mb-3">
+            <div className="relative flex-1 min-w-[160px]">
+              <Search className="w-3.5 h-3.5 text-gray-500 absolute left-2 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={altSearch}
+                onChange={e => setAltSearch(e.target.value)}
+                placeholder="Search player…"
+                className="w-full bg-gray-800 border border-gray-700 text-white text-xs rounded-lg pl-7 pr-2 py-1.5"
+              />
+            </div>
+            <select
+              value={altTeamFilter}
+              onChange={e => setAltTeamFilter(e.target.value)}
+              className="bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-2 py-1.5"
+            >
+              <option value="">All teams</option>
+              {altTeams.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <div className="flex items-center gap-1.5">
+              <ArrowUpDown className="w-3.5 h-3.5 text-gray-500" />
+              <select
+                value={altSort}
+                onChange={e => setAltSort(e.target.value as AltSortKey)}
+                className="bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-2 py-1.5"
+              >
+                <option value="safest">Safest</option>
+                <option value="ev">Best EV</option>
+                <option value="prob">Highest probability</option>
+                <option value="odds">Odds (shortest first)</option>
+                <option value="season">Season hit rate</option>
+                <option value="last5">Last-5 hit rate</option>
+              </select>
+            </div>
+          </div>
+
+          {altConflictMsg && (
+            <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mb-3">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              {altConflictMsg}
+            </div>
+          )}
+
+          {/* Selectable lines */}
+          <div className="max-h-80 overflow-y-auto space-y-1 mb-3 pr-1">
+            {altLinesLoading && (
+              <p className="text-xs text-gray-600 px-1 py-2">Loading every genuine bookmaker line for this match…</p>
+            )}
+            {!altLinesLoading && altLinesFiltered.length === 0 && (
+              <p className="text-xs text-gray-600 px-1 py-2">
+                {pickableLegs.length === 0 ? 'No genuine lines available yet for this match.' : 'No lines match your search/filter.'}
+              </p>
+            )}
+            {altLinesFiltered.map(leg => {
+              const key = legKey(leg);
+              const isPicked = altSelectedKeys.includes(key);
+              const fr = leg.row.freshness;
+              const isStale = Boolean(fr && fr.freshnessStatus !== 'CURRENT');
+              return (
+                <button
+                  key={key}
+                  onClick={() => toggleAltLeg(leg)}
+                  disabled={isStale && !isPicked}
+                  className={`w-full text-left px-2.5 py-2 rounded-lg border transition disabled:opacity-40 disabled:cursor-not-allowed ${
+                    isPicked ? 'bg-cyan-500/10 border-cyan-500/40' : 'bg-gray-800/40 border-gray-800 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      {isPicked ? <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0" /> : <span className="w-3.5 shrink-0" />}
+                      <span className="text-white text-sm font-medium">{leg.playerName}</span>
+                      <span className="text-gray-500 text-[10px]">{leg.team}</span>
+                      <span className="text-cyan-400 text-xs">{leg.displayLabel}</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] text-gray-500">
+                      <span className="text-white font-bold text-xs">${leg.odds.toFixed(2)}</span>
+                      <span>Season {leg.seasonHitRate.toFixed(0)}%</span>
+                      <span>L5 {leg.last5HitRate.toFixed(0)}%</span>
+                      <span>Adj prob {(leg.modelProb * 100).toFixed(0)}%</span>
+                      <span className={leg.expectedValue >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                        EV {leg.expectedValue >= 0 ? '+' : ''}{(leg.expectedValue * 100).toFixed(0)}%
+                      </span>
+                      <span className={leg.riskLevel === 'Low' ? 'text-emerald-400' : leg.riskLevel === 'Medium' ? 'text-amber-400' : 'text-red-400'}>{leg.riskLevel}</span>
+                      {isStale && <span className="text-amber-500">Stale</span>}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Selected slip */}
+          {altSelectedLegs.length === 0 ? (
             <p className="text-xs text-gray-600">
-              Pick any legs from "Best Individual Disposal Legs" above — mix and match your own players and lines, and see the combined price update here.
+              Pick any genuine line above — every real ladder rung and Over/Under for this match's eligible players. Mix and match, see the combined price update here.
             </p>
           ) : (
             <div className="space-y-3">
               <div className="flex flex-wrap gap-2">
-                {selectedCustomLegs.map(leg => (
-                  <span key={leg.playerId} className="flex items-center gap-1.5 text-xs text-white bg-gray-800 border border-gray-700 rounded-full pl-3 pr-1.5 py-1">
-                    {leg.playerName} {leg.displayLabel ?? `${leg.line}+`} @{leg.odds.toFixed(2)}
-                    <button onClick={() => toggleCustomLeg(leg.playerId)} className="p-0.5 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white transition">
+                {altSelectedLegs.map(leg => (
+                  <span key={legKey(leg)} className="flex items-center gap-1.5 text-xs text-white bg-gray-800 border border-gray-700 rounded-full pl-3 pr-1.5 py-1">
+                    {leg.playerName} {leg.displayLabel} @{leg.odds.toFixed(2)}
+                    <button onClick={() => toggleAltLeg(leg)} className="p-0.5 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white transition">
                       <X className="w-3 h-3" />
                     </button>
                   </span>
                 ))}
               </div>
 
-              {selectedCustomLegs.length === 1 ? (
+              {altSelectedLegs.length === 1 ? (
                 <p className="text-xs text-gray-500">Add at least one more leg to see a combined multi price.</p>
-              ) : customMulti ? (
+              ) : altMulti && (
                 <div className="bg-gray-800/50 rounded-lg p-3">
                   <div className="flex items-center gap-4 text-sm flex-wrap">
-                    <span className="text-white font-bold">{customMulti.legCount} legs · ${customMulti.combinedOdds.toFixed(2)}</span>
-                    <span className="text-gray-400">Conservative prob: {(customMulti.conservativeProbability * 100).toFixed(0)}%</span>
-                    <span className={customMulti.estimatedEV >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                      Est EV: {customMulti.estimatedEV >= 0 ? '+' : ''}{(customMulti.estimatedEV * 100).toFixed(0)}%
+                    <span className="text-white font-bold">{altSelectedLegs.length} legs · ${altMulti.combinedOdds.toFixed(2)}</span>
+                    <span className="text-gray-400">Conservative prob: {(altMulti.conservativeProbability * 100).toFixed(0)}%</span>
+                    <span className={altMulti.estimatedEV >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      Est EV: {altMulti.estimatedEV >= 0 ? '+' : ''}{(altMulti.estimatedEV * 100).toFixed(0)}%
                     </span>
                   </div>
-                  {customMulti.warnings.length > 0 && (
-                    <div className="mt-2 space-y-0.5">
-                      {customMulti.warnings.map((w, i) => (
-                        <p key={i} className="text-[10px] text-amber-400 flex items-center gap-1"><AlertTriangle className="w-2.5 h-2.5 shrink-0" /> {w}</p>
-                      ))}
-                    </div>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-500">
+                    <span>Raw independent prob: {(altMulti.rawProbability * 100).toFixed(0)}%</span>
+                    <span>Avg adjusted prob: {(altMulti.avgAdjustedProb * 100).toFixed(0)}%</span>
+                    <span>Weakest leg: {altMulti.weakestLeg.playerName} {altMulti.weakestLeg.displayLabel} ({(altMulti.weakestLeg.modelProb * 100).toFixed(0)}%)</span>
+                    {altMulti.highestRiskLeg && (
+                      <span className="text-amber-400">Highest risk: {altMulti.highestRiskLeg.playerName} ({altMulti.highestRiskLeg.riskLevel})</span>
+                    )}
+                  </div>
+                  {altMulti.hasSameMatchLegs && (
+                    <p className="mt-2 text-[10px] text-amber-400 flex items-center gap-1">
+                      <AlertTriangle className="w-2.5 h-2.5 shrink-0" /> All legs from same match — probability may be overstated due to correlation.
+                    </p>
                   )}
                 </div>
-              ) : (
-                <p className="text-xs text-red-400">Couldn't price this combination — you may have picked the same player twice.</p>
               )}
             </div>
           )}
