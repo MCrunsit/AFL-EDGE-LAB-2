@@ -374,15 +374,21 @@ export default function MultiBuilderPage() {
           useOpponentEdge,
         }))
       );
+      // `r.rows` has WRONG_TEAM rows already excluded (getModelledBookmakerOddsForMatch
+      // filters them out so they can never leak into legs/recommendations) — so counts
+      // like wrongTeam and totalOddsRows must come from each match's own `coverage`
+      // (computed before that filter), not be re-derived from the filtered rows.
       const allRows = results.flatMap(r => r.rows);
+      const sumCoverage = (key: keyof ModelCoverage) =>
+        results.reduce((sum, r) => sum + (r.coverage[key] as number), 0);
       const totalCoverage: ModelCoverage = {
-        totalOddsRows: allRows.length,
-        modelReady: allRows.filter(r => r.modelStatus === 'MODEL_READY').length,
-        oddsOnly: allRows.filter(r => r.modelStatus === 'ODDS_ONLY').length,
-        noStats: allRows.filter(r => r.modelStatus === 'NO_STATS').length,
-        insufficientSample: allRows.filter(r => r.modelStatus === 'INSUFFICIENT_MARKET_SAMPLE').length,
-        wrongTeam: allRows.filter(r => r.modelStatus === 'WRONG_TEAM').length,
-        unresolvedPlayer: allRows.filter(r => r.modelStatus === 'PLAYER_UNRESOLVED').length,
+        totalOddsRows: sumCoverage('totalOddsRows'),
+        modelReady: sumCoverage('modelReady'),
+        oddsOnly: sumCoverage('oddsOnly'),
+        noStats: sumCoverage('noStats'),
+        insufficientSample: sumCoverage('insufficientSample'),
+        wrongTeam: sumCoverage('wrongTeam'),
+        unresolvedPlayer: sumCoverage('unresolvedPlayer'),
         modelReadyPlayers: new Set(allRows.filter(r => r.modelStatus === 'MODEL_READY' && r.resolvedPlayerId).map(r => r.resolvedPlayerId!)).size,
         lastRefreshed: new Date(),
       };

@@ -417,6 +417,7 @@ export async function importDfsRows(csvText: string): Promise<DfsImportReport> {
       kick_in_count: pick(r.kickInCount, existing?.kick_in_count),
       kick_in_play_on_count: pick(r.kickInPlayOnCount, existing?.kick_in_play_on_count),
       kick_in_share: pick(r.kickInShare, existing?.kick_in_share),
+      time_on_ground: pick(r.timeOnGround, existing?.time_on_ground),
       source: 'DFS Australia',
       updated_at: new Date().toISOString(),
     };
