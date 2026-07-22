@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
-import { Target, Award, AlertCircle, Loader2, X, RefreshCw, ChevronDown, ChevronRight, Zap, AlertTriangle, Wrench, Check, Minus, TrendingUp, TrendingDown, UserX } from 'lucide-react';
-import type { MultiCandidate, OptimizerDiagnostics, OptimizerProgress, MultiOptimizerSettings, CancellationRef, OptimizerPreset } from '../lib/multiOptimizer';
-import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, SAME_GAME_PRESET } from '../lib/multiOptimizer';
+import { Target, Award, AlertCircle, Loader2, X, RefreshCw, ChevronDown, ChevronRight, Zap, AlertTriangle, Wrench, Check, Minus, TrendingUp, TrendingDown, UserX, Plus, ListPlus } from 'lucide-react';
+import type { MultiCandidate, OptimizerDiagnostics, OptimizerProgress, MultiOptimizerSettings, CancellationRef, OptimizerPreset, OptimizerLeg } from '../lib/multiOptimizer';
+import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, SAME_GAME_PRESET, rowToLeg, buildCustomMulti } from '../lib/multiOptimizer';
 import type { DisposalLineRecommendation } from '../lib/disposalLineSelector';
 import type { LineSafetyMode } from '../lib/disposalLineSelector';
 import type { TeamEnvironmentMap, TeamMatchupEnvironment } from '../lib/teamStatsService';
@@ -96,6 +96,7 @@ export default function MultiOptimizerPanel({
   const [excludedPlayers, setExcludedPlayers] = useState<ExcludedPlayer[]>([]);
   const [exclusionSearch, setExclusionSearch] = useState('');
   const [showExclusionPanel, setShowExclusionPanel] = useState(false);
+  const [customLegIds, setCustomLegIds] = useState<string[]>([]);
   const cancelRef = useRef<CancellationRef>({ cancelled: false });
 
   // Load saved exclusions when the selected match changes
@@ -105,6 +106,7 @@ export default function MultiOptimizerPanel({
     } else {
       setExcludedPlayers([]);
     }
+    setCustomLegIds([]);
   }, [selectedMatchId, mode]);
 
   function switchMode(newMode: 'gameMulti' | 'roundMulti') {
@@ -284,6 +286,26 @@ export default function MultiOptimizerPanel({
   }
 
   const safeLineCount = gameRecommendations.filter(r => r.safeLine).length;
+
+  // Pool of pickable legs for the custom builder — same source as "Best Individual Disposal Legs"
+  const customLegPool = useMemo(() => {
+    return gameRecommendations
+      .filter(r => r.safeLine)
+      .map(r => rowToLeg(r.safeLine!, matchNames[r.matchId] ?? r.matchId, teamEnvMap, roleTrends));
+  }, [gameRecommendations, matchNames, teamEnvMap, roleTrends]);
+
+  const selectedCustomLegs = useMemo(() => {
+    const byId = new Map(customLegPool.map(l => [l.playerId, l]));
+    return customLegIds.map(id => byId.get(id)).filter((l): l is OptimizerLeg => Boolean(l));
+  }, [customLegPool, customLegIds]);
+
+  const customMulti = useMemo(() => buildCustomMulti(selectedCustomLegs), [selectedCustomLegs]);
+
+  const toggleCustomLeg = useCallback((playerId: string) => {
+    setCustomLegIds(prev => prev.includes(playerId) ? prev.filter(id => id !== playerId) : [...prev, playerId]);
+  }, []);
+
+  const clearCustomLegs = useCallback(() => setCustomLegIds([]), []);
 
   return (
     <div className="space-y-4">
@@ -488,15 +510,30 @@ export default function MultiOptimizerPanel({
       {/* Section A — Best Individual Legs */}
       {gameRecommendations.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <h3 className="text-white font-semibold text-sm mb-3">Best Individual Disposal Legs</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-white font-semibold text-sm">Best Individual Disposal Legs</h3>
+            <span className="text-[10px] text-gray-500">Click + to add a leg to your own multi below</span>
+          </div>
           <div className="space-y-2">
-            {gameRecommendations.filter(r => r.safeLine).slice(0, 20).map((rec, i) => {
+            {gameRecommendations.filter(r => r.safeLine).map((rec, i) => {
               const fr = rec.safeLine!.freshness;
               const isStale = fr && fr.freshnessStatus !== 'CURRENT';
+              const playerId = rec.safeLine!.resolvedPlayerId ?? rec.safeLine!.player_id ?? rec.safeLine!.player_name;
+              const isPicked = customLegIds.includes(playerId);
               return (
-                <div key={i} className={`py-2 border-b border-gray-800/30 last:border-0 ${isStale ? 'opacity-60' : ''}`}>
+                <div key={i} className={`py-2 border-b border-gray-800/30 last:border-0 ${isStale ? 'opacity-60' : ''} ${isPicked ? 'bg-emerald-500/5 -mx-2 px-2 rounded' : ''}`}>
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => toggleCustomLeg(playerId)}
+                        disabled={Boolean(isStale)}
+                        title={isStale ? 'Stale/unverified data — cannot add to custom multi' : isPicked ? 'Remove from your multi' : 'Add to your multi'}
+                        className={`w-5 h-5 flex items-center justify-center rounded transition shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+                          isPicked ? 'bg-emerald-500 text-gray-950' : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
+                        }`}
+                      >
+                        {isPicked ? <Check className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+                      </button>
                       <span className="text-gray-600 text-xs font-mono">{i + 1}</span>
                       <div>
                         <span className="text-white font-medium text-sm">{rec.playerName}</span>
@@ -524,6 +561,65 @@ export default function MultiOptimizerPanel({
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* Section A.5 — Build Your Own Multi */}
+      {gameRecommendations.length > 0 && (
+        <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <ListPlus className="w-4 h-4 text-cyan-400" />
+              <h3 className="text-white font-semibold text-sm">Build Your Own Multi</h3>
+            </div>
+            {selectedCustomLegs.length > 0 && (
+              <button onClick={clearCustomLegs} className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-400 transition">
+                <X className="w-3 h-3" /> Clear ({selectedCustomLegs.length})
+              </button>
+            )}
+          </div>
+
+          {selectedCustomLegs.length === 0 ? (
+            <p className="text-xs text-gray-600">
+              Pick any legs from "Best Individual Disposal Legs" above — mix and match your own players and lines, and see the combined price update here.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                {selectedCustomLegs.map(leg => (
+                  <span key={leg.playerId} className="flex items-center gap-1.5 text-xs text-white bg-gray-800 border border-gray-700 rounded-full pl-3 pr-1.5 py-1">
+                    {leg.playerName} {leg.displayLabel ?? `${leg.line}+`} @{leg.odds.toFixed(2)}
+                    <button onClick={() => toggleCustomLeg(leg.playerId)} className="p-0.5 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white transition">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+
+              {selectedCustomLegs.length === 1 ? (
+                <p className="text-xs text-gray-500">Add at least one more leg to see a combined multi price.</p>
+              ) : customMulti ? (
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <div className="flex items-center gap-4 text-sm flex-wrap">
+                    <span className="text-white font-bold">{customMulti.legCount} legs · ${customMulti.combinedOdds.toFixed(2)}</span>
+                    <span className="text-gray-400">Conservative prob: {(customMulti.conservativeProbability * 100).toFixed(0)}%</span>
+                    <span className={customMulti.estimatedEV >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      Est EV: {customMulti.estimatedEV >= 0 ? '+' : ''}{(customMulti.estimatedEV * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  {customMulti.warnings.length > 0 && (
+                    <div className="mt-2 space-y-0.5">
+                      {customMulti.warnings.map((w, i) => (
+                        <p key={i} className="text-[10px] text-amber-400 flex items-center gap-1"><AlertTriangle className="w-2.5 h-2.5 shrink-0" /> {w}</p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-red-400">Couldn't price this combination — you may have picked the same player twice.</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 
