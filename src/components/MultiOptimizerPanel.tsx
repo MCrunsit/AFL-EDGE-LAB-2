@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
-import { Target, Award, AlertCircle, Loader2, X, RefreshCw, ChevronDown, ChevronRight, Zap, AlertTriangle, Wrench, Check, UserX, Search, ArrowUpDown, ListPlus, Info } from 'lucide-react';
+import { Target, Award, AlertCircle, Loader2, X, RefreshCw, ChevronDown, ChevronRight, Zap, AlertTriangle, Wrench, Check, UserX, Search, ArrowUpDown, ListPlus, Info, Plus, Wand2 } from 'lucide-react';
 import type { MultiCandidate, OptimizerDiagnostics, OptimizerProgress, MultiOptimizerSettings, CancellationRef } from '../lib/multiOptimizer';
 import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, applyCorrelationHaircut } from '../lib/multiOptimizer';
 import type { DisposalLineRecommendation } from '../lib/disposalLineSelector';
@@ -33,6 +33,7 @@ const ALL_LINES_SETTINGS: PullEmSettings = {
 };
 
 type AltSortKey = 'safest' | 'ev' | 'prob' | 'odds' | 'season' | 'last5';
+type CompletionMode = 'safest' | 'bestValue' | 'closestTarget' | 'bestMatchup' | 'lowestCorrelation';
 
 function legKey(leg: PullEmLeg): string {
   return `${leg.playerId}|${leg.selectionType}|${leg.line}`;
@@ -136,6 +137,9 @@ export default function MultiOptimizerPanel({
     setAltConflictMsg(null);
     setAltSearch('');
     setAltTeamFilter('');
+    setCompletionNotes({});
+    setCompletionMsg(null);
+    setSwapCandidates(null);
   }, [selectedMatchId, mode]);
 
   function switchMode(newMode: 'gameMulti' | 'roundMulti') {
@@ -425,6 +429,9 @@ export default function MultiOptimizerPanel({
   const clearAltLegs = useCallback(() => {
     setAltSelectedKeys([]);
     setAltConflictMsg(null);
+    setCompletionNotes({});
+    setCompletionMsg(null);
+    setSwapCandidates(null);
   }, []);
 
   const altMulti = useMemo(() => {
@@ -444,6 +451,154 @@ export default function MultiOptimizerPanel({
       weakestLeg, highestRiskLeg, hasSameMatchLegs: matchIds.size < altSelectedLegs.length,
     };
   }, [altSelectedLegs]);
+
+  // ── Lock legs + Complete My Multi ──────────────────────────────────────
+  // "Locked" legs are simply whatever is currently selected in altSelectedLegs
+  // (1-3 of them, picked manually above) — Complete My Multi fills the rest.
+  const [completionMode, setCompletionMode] = useState<CompletionMode>('safest');
+  const [targetOddsPreset, setTargetOddsPreset] = useState<'2' | '3' | '5' | 'custom'>('2');
+  const [customTargetOdds, setCustomTargetOdds] = useState('4.00');
+  const [completionNotes, setCompletionNotes] = useState<Record<string, string>>({});
+  const [completionMsg, setCompletionMsg] = useState<string | null>(null);
+  const [swapCandidates, setSwapCandidates] = useState<{ label: string; leg: PullEmLeg }[] | null>(null);
+
+  const effectiveTargetOdds = targetOddsPreset === 'custom'
+    ? (parseFloat(customTargetOdds) || 4.0)
+    : parseFloat(targetOddsPreset);
+
+  // Clear stale swap suggestions whenever the slip itself changes
+  useEffect(() => { setSwapCandidates(null); }, [altSelectedKeys]);
+
+  function scoreForMode(leg: PullEmLeg, mode: CompletionMode, opposingTeams: Set<string>, currentOdds: number, targetOdds: number): number {
+    switch (mode) {
+      case 'safest': return leg.modelProb;
+      case 'bestValue': return leg.expectedValue;
+      case 'bestMatchup': return leg.row.totalMatchupAdjustment ?? 0;
+      case 'lowestCorrelation': return (opposingTeams.has(leg.team) ? 1 : 0) + leg.modelProb * 0.01;
+      case 'closestTarget': return -Math.abs(currentOdds * leg.odds - targetOdds);
+    }
+  }
+
+  function reasonForMode(leg: PullEmLeg, mode: CompletionMode, targetOdds: number): string {
+    switch (mode) {
+      case 'safest': return `Highest remaining probability (${(leg.modelProb * 100).toFixed(0)}%)`;
+      case 'bestValue': return `Best expected value (${leg.expectedValue >= 0 ? '+' : ''}${(leg.expectedValue * 100).toFixed(0)}%)`;
+      case 'bestMatchup': return leg.row.totalMatchupAdjustment
+        ? `Matchup edge ${leg.row.totalMatchupAdjustment > 0 ? '+' : ''}${(leg.row.totalMatchupAdjustment * 100).toFixed(1)}%`
+        : 'No matchup edge data — neutral pick';
+      case 'lowestCorrelation': return 'From the opposing team, to reduce same-team correlation';
+      case 'closestTarget': return `Keeps combined odds closest to your $${targetOdds.toFixed(2)} target`;
+    }
+  }
+
+  // Greedy fill: one leg per remaining slot, always the best-scoring not-yet-used player.
+  function runCompletion(mode: CompletionMode, targetOdds: number, maxTotalLegs: number) {
+    const locked = altSelectedLegs;
+    const usedPlayerIds = new Set(locked.map(l => l.playerId));
+    let currentOdds = locked.reduce((p, l) => p * l.odds, 1);
+    const usedTeams = new Set(locked.map(l => l.team));
+    const homeTeam = selectedMatch?.home_team ?? null;
+    const awayTeam = selectedMatch?.away_team ?? null;
+    const added: PullEmLeg[] = [];
+    const notes: Record<string, string> = {};
+
+    const slotsToFill = Math.max(0, maxTotalLegs - locked.length);
+    for (let i = 0; i < slotsToFill; i++) {
+      const opposingTeams = new Set<string>();
+      if (usedTeams.size === 1) {
+        const only = [...usedTeams][0];
+        if (homeTeam && only !== homeTeam) opposingTeams.add(homeTeam);
+        if (awayTeam && only !== awayTeam) opposingTeams.add(awayTeam);
+      }
+
+      const byPlayer = new Map<string, PullEmLeg>();
+      for (const leg of pickableLegs) {
+        if (usedPlayerIds.has(leg.playerId)) continue;
+        if (currentOdds * leg.odds > targetOdds * 1.5) continue;
+        const existing = byPlayer.get(leg.playerId);
+        if (!existing || scoreForMode(leg, mode, opposingTeams, currentOdds, targetOdds) > scoreForMode(existing, mode, opposingTeams, currentOdds, targetOdds)) {
+          byPlayer.set(leg.playerId, leg);
+        }
+      }
+      const candidates = [...byPlayer.values()].sort(
+        (a, b) => scoreForMode(b, mode, opposingTeams, currentOdds, targetOdds) - scoreForMode(a, mode, opposingTeams, currentOdds, targetOdds)
+      );
+      const chosen = candidates[0];
+      if (!chosen) break;
+
+      added.push(chosen);
+      notes[legKey(chosen)] = reasonForMode(chosen, mode, targetOdds);
+      usedPlayerIds.add(chosen.playerId);
+      usedTeams.add(chosen.team);
+      currentOdds *= chosen.odds;
+
+      if (mode === 'closestTarget' && currentOdds >= targetOdds * 0.9) break;
+    }
+    return { added, notes };
+  }
+
+  const handleCompleteMulti = useCallback(() => {
+    const { added, notes } = runCompletion(completionMode, effectiveTargetOdds, 4);
+    if (added.length === 0) {
+      setCompletionMsg('No eligible legs left to complete this multi — try a different mode, a higher target, or fewer locked legs.');
+      return;
+    }
+    setAltSelectedKeys(prev => [...prev, ...added.map(legKey)]);
+    setCompletionNotes(prev => ({ ...prev, ...notes }));
+    setCompletionMsg(null);
+  }, [altSelectedLegs, pickableLegs, completionMode, effectiveTargetOdds, selectedMatch]);
+
+  const handleSuggestNextLeg = useCallback(() => {
+    const { added, notes } = runCompletion(completionMode, effectiveTargetOdds, altSelectedLegs.length + 1);
+    if (added.length === 0) {
+      setCompletionMsg('No eligible next leg found for this mode/target.');
+      return;
+    }
+    setAltSelectedKeys(prev => [...prev, legKey(added[0])]);
+    setCompletionNotes(prev => ({ ...prev, ...notes }));
+    setCompletionMsg(null);
+  }, [altSelectedLegs, pickableLegs, completionMode, effectiveTargetOdds, selectedMatch]);
+
+  const handleSwapWeakest = useCallback(() => {
+    if (!altMulti) return;
+    const weakest = altMulti.weakestLeg;
+    const usedPlayerIds = new Set(altSelectedLegs.filter(l => l !== weakest).map(l => l.playerId));
+    const pool = pickableLegs.filter(l => l.playerId !== weakest.playerId && !usedPlayerIds.has(l.playerId));
+
+    const bestByPlayerSafest = new Map<string, PullEmLeg>();
+    const bestByPlayerEV = new Map<string, PullEmLeg>();
+    for (const leg of pool) {
+      const s = bestByPlayerSafest.get(leg.playerId);
+      if (!s || leg.modelProb > s.modelProb) bestByPlayerSafest.set(leg.playerId, leg);
+      const e = bestByPlayerEV.get(leg.playerId);
+      if (!e || leg.expectedValue > e.expectedValue) bestByPlayerEV.set(leg.playerId, leg);
+    }
+    const usedTeams = new Set(altSelectedLegs.filter(l => l !== weakest).map(l => l.team));
+
+    const safer = [...bestByPlayerSafest.values()].sort((a, b) => b.modelProb - a.modelProb)[0];
+    const higherEV = [...bestByPlayerEV.values()].sort((a, b) => b.expectedValue - a.expectedValue)[0];
+    const lowerCorr = [...bestByPlayerSafest.values()].filter(l => !usedTeams.has(l.team)).sort((a, b) => b.modelProb - a.modelProb)[0];
+
+    const suggestions: { label: string; leg: PullEmLeg }[] = [];
+    if (safer && safer.modelProb > weakest.modelProb) suggestions.push({ label: 'Safer', leg: safer });
+    if (higherEV && higherEV.expectedValue > weakest.expectedValue && higherEV.playerId !== safer?.playerId) suggestions.push({ label: 'Higher EV', leg: higherEV });
+    if (lowerCorr && !suggestions.some(s => s.leg.playerId === lowerCorr.playerId)) suggestions.push({ label: 'Lower correlation', leg: lowerCorr });
+
+    if (suggestions.length === 0) {
+      setCompletionMsg(`${weakest.playerName} ${weakest.displayLabel} is already the best available pick — no better replacement found.`);
+      setSwapCandidates(null);
+      return;
+    }
+    setCompletionMsg(null);
+    setSwapCandidates(suggestions.slice(0, 3));
+  }, [altMulti, altSelectedLegs, pickableLegs]);
+
+  const applySwap = useCallback((replacement: PullEmLeg) => {
+    if (!altMulti) return;
+    const weakest = altMulti.weakestLeg;
+    setAltSelectedKeys(prev => prev.filter(k => k !== legKey(weakest)).concat(legKey(replacement)));
+    setSwapCandidates(null);
+  }, [altMulti]);
 
   useEffect(() => {
     onResultsChange?.({
@@ -821,7 +976,7 @@ export default function MultiOptimizerPanel({
             <div className="space-y-3">
               <div className="flex flex-wrap gap-2">
                 {altSelectedLegs.map(leg => (
-                  <span key={legKey(leg)} className="flex items-center gap-1.5 text-xs text-white bg-gray-800 border border-gray-700 rounded-full pl-3 pr-1.5 py-1">
+                  <span key={legKey(leg)} className="flex items-center gap-1.5 text-xs text-white bg-gray-800 border border-gray-700 rounded-full pl-3 pr-1.5 py-1" title={completionNotes[legKey(leg)]}>
                     {leg.playerName} {leg.displayLabel} @{leg.odds.toFixed(2)}
                     <button onClick={() => toggleAltLeg(leg)} className="p-0.5 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white transition">
                       <X className="w-3 h-3" />
@@ -829,6 +984,15 @@ export default function MultiOptimizerPanel({
                   </span>
                 ))}
               </div>
+              {altSelectedLegs.some(l => completionNotes[legKey(l)]) && (
+                <div className="space-y-0.5">
+                  {altSelectedLegs.filter(l => completionNotes[legKey(l)]).map(l => (
+                    <p key={legKey(l)} className="text-[10px] text-cyan-400/80">
+                      {l.playerName} {l.displayLabel}: {completionNotes[legKey(l)]}
+                    </p>
+                  ))}
+                </div>
+              )}
 
               {altSelectedLegs.length === 1 ? (
                 <p className="text-xs text-gray-500">Add at least one more leg to see a combined multi price.</p>
@@ -856,8 +1020,98 @@ export default function MultiOptimizerPanel({
                   )}
                 </div>
               )}
+
+              {swapCandidates && (
+                <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">
+                  <p className="text-xs text-amber-400 mb-2">
+                    Replace weakest leg ({altMulti?.weakestLeg.playerName} {altMulti?.weakestLeg.displayLabel}) with:
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {swapCandidates.map(({ label, leg }) => (
+                      <button
+                        key={legKey(leg)}
+                        onClick={() => applySwap(leg)}
+                        className="text-xs text-left bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg px-2.5 py-1.5 transition"
+                      >
+                        <span className="text-amber-400 font-medium">{label}: </span>
+                        <span className="text-white">{leg.playerName} {leg.displayLabel} @{leg.odds.toFixed(2)}</span>
+                        <span className="text-gray-500"> · {(leg.modelProb * 100).toFixed(0)}% prob</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
+
+          {/* Lock legs + Complete My Multi */}
+          <div className="mt-4 pt-3 border-t border-gray-800">
+            <div className="flex items-center gap-2 mb-2">
+              <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-xs font-semibold text-white">Complete My Multi</span>
+              <span className="text-[10px] text-gray-500">Lock 1-3 legs above, then let the model pick the rest</span>
+            </div>
+            <div className="flex flex-wrap gap-2 mb-2">
+              <select
+                value={completionMode}
+                onChange={e => setCompletionMode(e.target.value as CompletionMode)}
+                className="bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-2 py-1.5"
+              >
+                <option value="safest">Safest</option>
+                <option value="bestValue">Best Value</option>
+                <option value="closestTarget">Closest to Target Odds</option>
+                <option value="bestMatchup">Best Matchup</option>
+                <option value="lowestCorrelation">Lowest Correlation</option>
+              </select>
+              <select
+                value={targetOddsPreset}
+                onChange={e => setTargetOddsPreset(e.target.value as typeof targetOddsPreset)}
+                className="bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-2 py-1.5"
+              >
+                <option value="2">Target $2.00</option>
+                <option value="3">Target $3.00</option>
+                <option value="5">Target $5.00</option>
+                <option value="custom">Custom target…</option>
+              </select>
+              {targetOddsPreset === 'custom' && (
+                <input
+                  type="number"
+                  step="0.5"
+                  value={customTargetOdds}
+                  onChange={e => setCustomTargetOdds(e.target.value)}
+                  className="w-20 bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-2 py-1.5"
+                />
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleCompleteMulti}
+                disabled={altSelectedLegs.length >= 4}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-xs font-medium transition"
+              >
+                <Wand2 className="w-3.5 h-3.5" /> Complete My Multi
+              </button>
+              <button
+                onClick={handleSuggestNextLeg}
+                disabled={altSelectedLegs.length >= 4}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-xs font-medium transition"
+              >
+                <Plus className="w-3.5 h-3.5" /> Suggest Next Leg
+              </button>
+              <button
+                onClick={handleSwapWeakest}
+                disabled={altSelectedLegs.length < 2}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-xs font-medium transition"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Swap Weakest Leg
+              </button>
+            </div>
+            {completionMsg && (
+              <p className="mt-2 text-xs text-amber-400 flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" /> {completionMsg}
+              </p>
+            )}
+          </div>
         </div>
       )}
 
