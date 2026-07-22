@@ -23,6 +23,10 @@ export interface RoleTrendEntry {
   playerId: string;
   playerName: string;
   team: string;
+  sampleSize: number;
+  latestCba: number | null;
+  latestKickInShare: number | null;
+  latestUpdatedAt: string | null;
   cbaSeasonAvg: number;
   cbaLast5: number;
   cbaLast3: number;
@@ -160,6 +164,10 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
       playerId,
       playerName: '',
       team: '',
+      sampleSize: seasonRecords.length,
+      latestCba: first ? first.cbaPercentage : null,
+      latestKickInShare: first ? first.kickInShare : null,
+      latestUpdatedAt: first ? (first.updatedAt || null) : null,
       cbaSeasonAvg,
       cbaLast5,
       cbaLast3,

@@ -4,7 +4,7 @@ import type { MultiCandidate, OptimizerDiagnostics, OptimizerProgress, MultiOpti
 import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, applyCorrelationHaircut } from '../lib/multiOptimizer';
 import type { DisposalLineRecommendation } from '../lib/disposalLineSelector';
 import type { LineSafetyMode } from '../lib/disposalLineSelector';
-import type { TeamEnvironmentMap, TeamMatchupEnvironment } from '../lib/teamStatsService';
+import type { TeamEnvironmentMap, TeamMatchupEnvironment, TeamDisposalStats } from '../lib/teamStatsService';
 import { getLabelDisplay } from '../lib/teamStatsService';
 import type { RoleTrendMap } from '../lib/roleTrendService';
 import { getTrendDisplay } from '../lib/roleTrendService';
@@ -16,6 +16,11 @@ import {
   getExcludedPlayers, excludePlayer, unexcludePlayer, clearExcludedPlayers,
   type ExcludedPlayer,
 } from '../lib/playerExclusions';
+import type { PositionEdgeCache } from '../lib/positionEdge';
+import {
+  computePlayerIntelligence, getSharedPositionEdgeCache, type PlayerIntelligence,
+} from '../lib/playerIntelligenceService';
+import PlayerIntelligenceDrawer from './PlayerIntelligenceDrawer';
 
 const ALL_LINES_SETTINGS: PullEmSettings = {
   marketFocus: 'disposals_only',
@@ -50,6 +55,7 @@ interface Props {
   onLineSafetyChange: (mode: LineSafetyMode) => void;
   teamEnvMap?: TeamEnvironmentMap;
   teamMatchups?: TeamMatchupEnvironment[];
+  teamStats?: TeamDisposalStats[];
   roleTrends?: RoleTrendMap;
   /** Reports this panel's live counts up so the page-level diagnostics can show real, reconciled totals instead of a separate stale pipeline. */
   onResultsChange?: (info: { poolSize: number; multiCount: number; customLegsAvailable: number }) => void;
@@ -105,9 +111,99 @@ function LegRow({ leg, index }: { leg: MultiCandidate['legs'][number]; index: nu
   );
 }
 
+function positionBadgeColor(label: PlayerIntelligence['positionEdge']['label']): string {
+  switch (label) {
+    case 'VERY_POSITIVE': return 'bg-emerald-500/20 text-emerald-400';
+    case 'POSITIVE': return 'bg-emerald-500/10 text-emerald-400';
+    case 'NEGATIVE': return 'bg-red-500/10 text-red-400';
+    case 'VERY_NEGATIVE': return 'bg-red-500/20 text-red-400';
+    case 'NEUTRAL': return 'bg-gray-700/50 text-gray-400';
+    case 'INSUFFICIENT_DATA': return 'bg-gray-800 text-gray-600';
+  }
+}
+function positionBadgeText(label: PlayerIntelligence['positionEdge']['label']): string {
+  switch (label) {
+    case 'VERY_POSITIVE': return 'Very Positive';
+    case 'POSITIVE': return 'Positive';
+    case 'NEGATIVE': return 'Negative';
+    case 'VERY_NEGATIVE': return 'Very Negative';
+    case 'NEUTRAL': return 'Neutral';
+    case 'INSUFFICIENT_DATA': return 'Unknown';
+  }
+}
+function envBadgeColor(label: PlayerIntelligence['teamEnvironment']['label']): string {
+  switch (label) {
+    case 'HIGH': return 'bg-emerald-500/20 text-emerald-400';
+    case 'POSITIVE': return 'bg-emerald-500/10 text-emerald-400';
+    case 'NEGATIVE': return 'bg-red-500/10 text-red-400';
+    case 'LOW': return 'bg-red-500/20 text-red-400';
+    case 'NEUTRAL': return 'bg-gray-700/50 text-gray-400';
+    case 'INSUFFICIENT_DATA': return 'bg-gray-800 text-gray-600';
+  }
+}
+function roleBadgeColor(label: PlayerIntelligence['roleIntelligence']['label']): string {
+  switch (label) {
+    case 'ROLE_BOOST': return 'bg-emerald-500/20 text-emerald-400';
+    case 'SLIGHT_BOOST': return 'bg-emerald-500/10 text-emerald-400';
+    case 'SLIGHT_REDUCTION': return 'bg-red-500/10 text-red-400';
+    case 'ROLE_REDUCTION': return 'bg-red-500/20 text-red-400';
+    case 'STABLE': return 'bg-gray-700/50 text-gray-400';
+    case 'UNCERTAIN': return 'bg-gray-800 text-gray-600';
+  }
+}
+function roleBadgeText(label: PlayerIntelligence['roleIntelligence']['label']): string {
+  switch (label) {
+    case 'ROLE_BOOST': return 'Boost';
+    case 'SLIGHT_BOOST': return 'Slight Boost';
+    case 'SLIGHT_REDUCTION': return 'Slight Down';
+    case 'ROLE_REDUCTION': return 'Reduction';
+    case 'STABLE': return 'Stable';
+    case 'UNCERTAIN': return 'Unrated';
+  }
+}
+function scoreBadgeColor(label: PlayerIntelligence['intelligenceLabel']): string {
+  switch (label) {
+    case 'ELITE': return 'bg-emerald-500/20 text-emerald-400';
+    case 'STRONG': return 'bg-emerald-500/10 text-emerald-400';
+    case 'NEUTRAL': return 'bg-gray-700/50 text-gray-400';
+    case 'WEAK': return 'bg-amber-500/10 text-amber-400';
+    case 'AVOID': return 'bg-red-500/20 text-red-400';
+    case 'UNRATED': return 'bg-gray-800 text-gray-600';
+  }
+}
+
+function IntelBadges({ intel, onClick }: { intel: PlayerIntelligence | undefined; onClick?: () => void }) {
+  if (!intel) return null;
+  return (
+    <button
+      onClick={onClick}
+      title="View Player Intelligence"
+      className="flex items-center gap-1 flex-wrap text-left hover:opacity-80 transition"
+    >
+      <span className={`text-[9px] px-1.5 py-0.5 rounded ${positionBadgeColor(intel.positionEdge.label)}`}>
+        Position: {positionBadgeText(intel.positionEdge.label)}
+      </span>
+      <span className={`text-[9px] px-1.5 py-0.5 rounded ${envBadgeColor(intel.teamEnvironment.label)}`}>
+        Env: {getLabelDisplay(intel.teamEnvironment.label === 'HIGH' ? 'VERY_POSITIVE' : intel.teamEnvironment.label === 'LOW' ? 'VERY_NEGATIVE' : intel.teamEnvironment.label)}
+      </span>
+      <span className={`text-[9px] px-1.5 py-0.5 rounded ${roleBadgeColor(intel.roleIntelligence.label)}`}>
+        Role: {roleBadgeText(intel.roleIntelligence.label)}
+      </span>
+      <span className={`text-[9px] px-1.5 py-0.5 rounded ${scoreBadgeColor(intel.intelligenceLabel)}`}>
+        {intel.intelligenceScore !== null ? `Intel: ${intel.intelligenceScore} ${intel.intelligenceLabel}` : 'Intel: Unrated'}
+      </span>
+      {intel.dataConfidence !== null && (
+        <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">
+          Conf: {Math.round(intel.dataConfidence * 100)}%
+        </span>
+      )}
+    </button>
+  );
+}
+
 export default function MultiOptimizerPanel({
   recommendations, matchNames, matches, selectedMatchId, onSelectMatch,
-  statsRoundLabel, lineSafety, onLineSafetyChange, teamEnvMap, teamMatchups, roleTrends,
+  statsRoundLabel, lineSafety, onLineSafetyChange, teamEnvMap, teamMatchups, teamStats, roleTrends,
   onResultsChange,
 }: Props) {
   const [mode, setMode] = useState<'gameMulti' | 'roundMulti'>('gameMulti');
@@ -125,6 +221,27 @@ export default function MultiOptimizerPanel({
   const [exclusionSearch, setExclusionSearch] = useState('');
   const [showExclusionPanel, setShowExclusionPanel] = useState(false);
   const cancelRef = useRef<CancellationRef>({ cancelled: false });
+
+  // Position Edge cache for Player Intelligence — loaded once, independent of the
+  // separate "Use Position Edge" model toggle, so intelligence badges/drawer work
+  // regardless of whether that toggle is on.
+  const [positionEdgeCache, setPositionEdgeCache] = useState<PositionEdgeCache | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getSharedPositionEdgeCache().then(cache => { if (!cancelled) setPositionEdgeCache(cache); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Intelligence filters — display-only data plus optional filtering on the
+  // existing shared eligible-leg pool. Do not create a second pipeline: these
+  // filter the SAME gameRecommendations that already feed Best Individual Legs,
+  // Suggested Multis, and (via eligiblePlayerIds) the alternate-line builder.
+  const [filterPositiveMatchup, setFilterPositiveMatchup] = useState(false);
+  const [filterPositiveEnvironment, setFilterPositiveEnvironment] = useState(false);
+  const [filterRoleBoost, setFilterRoleBoost] = useState(false);
+  const [filterExcludeNegativeMatchup, setFilterExcludeNegativeMatchup] = useState(false);
+  const [filterSufficientIntelData, setFilterSufficientIntelData] = useState(false);
+  const [drawerPlayerId, setDrawerPlayerId] = useState<string | null>(null);
 
   // Load saved exclusions when the selected match changes
   useEffect(() => {
@@ -213,6 +330,107 @@ export default function MultiOptimizerPanel({
     });
   }, [gameRecommendationsRaw, excludedPlayerIds]);
 
+  // Player Intelligence — one entry per eligible player (Position Edge, Team
+  // Environment, Role Intelligence, genuine CBA/kick-in, intelligence score).
+  // Computed from gameRecommendations (post-exclusion, pre-intelligence-filter)
+  // so the filters below can consult it without a circular dependency.
+  const intelligenceByPlayer = useMemo(() => {
+    const map = new Map<string, PlayerIntelligence>();
+    for (const rec of gameRecommendations) {
+      const row = rec.safeLine;
+      if (!row) continue;
+      const playerId = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
+      if (!playerId || map.has(playerId)) continue;
+      map.set(playerId, computePlayerIntelligence({
+        row,
+        playerId,
+        playerName: row.player_name ?? rec.playerName,
+        team: row.playerTeam ?? '',
+        matchId: row.match_id ?? rec.matchId,
+        opponentTeam: row.opponent ?? null,
+        positionGroup: row.positionGroup ?? 'UNKNOWN',
+        statType: 'disposals',
+        positionEdgeCache,
+        teamEnvMap,
+        teamStats,
+        roleTrends,
+      }));
+    }
+    return map;
+  }, [gameRecommendations, positionEdgeCache, teamEnvMap, teamStats, roleTrends]);
+
+  // Intelligence filters applied on top of the shared eligible pool. Every
+  // downstream consumer below (Best Individual Legs, Suggested Multis via
+  // handleBuild, eligiblePlayerIds -> alternate-line builder -> Complete My
+  // Multi/Suggest Next Leg/Swap Weakest Leg) reads gameRecommendationsFiltered,
+  // not gameRecommendations, so filtering is consistent everywhere.
+  const intelligenceFilterActive = filterPositiveMatchup || filterPositiveEnvironment || filterRoleBoost || filterExcludeNegativeMatchup || filterSufficientIntelData;
+
+  const intelligenceFilterDiagnostics = useMemo(() => {
+    let excludedByMatchup = 0;
+    let excludedByEnvironment = 0;
+    let excludedByRole = 0;
+    let excludedByDataRequirement = 0;
+    let withPositionEdge = 0;
+    let withTeamEnvironment = 0;
+    let withRoleIntelligence = 0;
+    let withCba = 0;
+    let withKickIns = 0;
+    let withScore = 0;
+    let missingSufficientData = 0;
+    let eligibleLegs = 0;
+
+    for (const rec of gameRecommendations) {
+      const row = rec.safeLine;
+      if (!row) continue;
+      const pid = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
+      const intel = intelligenceByPlayer.get(pid);
+      if (!intel) continue;
+
+      eligibleLegs++;
+      if (intel.positionEdge.label !== 'INSUFFICIENT_DATA') withPositionEdge++;
+      if (intel.teamEnvironment.label !== 'INSUFFICIENT_DATA') withTeamEnvironment++;
+      if (intel.roleIntelligence.label !== 'UNCERTAIN') withRoleIntelligence++;
+      if (intel.cba.available) withCba++;
+      if (intel.kickIns.available) withKickIns++;
+      if (intel.intelligenceScore !== null) withScore++;
+      const sufficientData = intel.positionEdge.label !== 'INSUFFICIENT_DATA' || intel.teamEnvironment.label !== 'INSUFFICIENT_DATA' || intel.roleIntelligence.label !== 'UNCERTAIN';
+      if (!sufficientData) missingSufficientData++;
+
+      if (filterPositiveMatchup && !(intel.positionEdge.label === 'POSITIVE' || intel.positionEdge.label === 'VERY_POSITIVE')) excludedByMatchup++;
+      if (filterPositiveEnvironment && !(intel.teamEnvironment.label === 'POSITIVE' || intel.teamEnvironment.label === 'HIGH')) excludedByEnvironment++;
+      if (filterRoleBoost && !(intel.roleIntelligence.label === 'ROLE_BOOST' || intel.roleIntelligence.label === 'SLIGHT_BOOST')) excludedByRole++;
+      if (filterExcludeNegativeMatchup && (intel.positionEdge.label === 'NEGATIVE' || intel.positionEdge.label === 'VERY_NEGATIVE')) excludedByMatchup++;
+      if (filterSufficientIntelData && !sufficientData) excludedByDataRequirement++;
+    }
+
+    return {
+      eligibleLegs,
+      withPositionEdge, withTeamEnvironment, withRoleIntelligence, withCba, withKickIns, withScore,
+      missingSufficientData, excludedByMatchup, excludedByEnvironment, excludedByRole, excludedByDataRequirement,
+    };
+  }, [gameRecommendations, intelligenceByPlayer, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData]);
+
+  const gameRecommendationsFiltered = useMemo(() => {
+    if (!intelligenceFilterActive) return gameRecommendations;
+    return gameRecommendations.filter(rec => {
+      const row = rec.safeLine;
+      if (!row) return false;
+      const pid = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
+      const intel = intelligenceByPlayer.get(pid);
+      if (!intel) return false;
+
+      const sufficientData = intel.positionEdge.label !== 'INSUFFICIENT_DATA' || intel.teamEnvironment.label !== 'INSUFFICIENT_DATA' || intel.roleIntelligence.label !== 'UNCERTAIN';
+
+      if (filterPositiveMatchup && !(intel.positionEdge.label === 'POSITIVE' || intel.positionEdge.label === 'VERY_POSITIVE')) return false;
+      if (filterPositiveEnvironment && !(intel.teamEnvironment.label === 'POSITIVE' || intel.teamEnvironment.label === 'HIGH')) return false;
+      if (filterRoleBoost && !(intel.roleIntelligence.label === 'ROLE_BOOST' || intel.roleIntelligence.label === 'SLIGHT_BOOST')) return false;
+      if (filterExcludeNegativeMatchup && (intel.positionEdge.label === 'NEGATIVE' || intel.positionEdge.label === 'VERY_NEGATIVE')) return false;
+      if (filterSufficientIntelData && !sufficientData) return false;
+      return true;
+    });
+  }, [gameRecommendations, intelligenceByPlayer, intelligenceFilterActive, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData]);
+
   // Unique players from the recommendations for the selected match — for the exclusion UI
   const matchPlayers = useMemo(() => {
     if (mode !== 'gameMulti' || !selectedMatchId) return [];
@@ -289,7 +507,7 @@ export default function MultiOptimizerPanel({
 
     try {
       // Exclude stale/uncertain players from automatic multis
-      const freshRecommendations = gameRecommendations.filter(rec => {
+      const freshRecommendations = gameRecommendationsFiltered.filter(rec => {
         const sourceLine = settings.preset === 'sameGame' ? (rec.balancedLine ?? rec.safeLine) : rec.safeLine;
         if (!sourceLine) return false;
         const fr = sourceLine.freshness;
@@ -318,7 +536,7 @@ export default function MultiOptimizerPanel({
     cancelRef.current.cancelled = true;
   }
 
-  const safeLineCount = gameRecommendations.filter(r => r.safeLine).length;
+  const safeLineCount = gameRecommendationsFiltered.filter(r => r.safeLine).length;
 
   // ── Alternate-line custom builder ──────────────────────────────────────
   // Fetch every genuine bookmaker_odds row for the selected match (ladder + O/U),
@@ -354,13 +572,13 @@ export default function MultiOptimizerPanel({
 
   const eligiblePlayerIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const r of gameRecommendations) {
+    for (const r of gameRecommendationsFiltered) {
       if (!r.safeLine) continue;
       const pid = r.safeLine.player_id ?? r.safeLine.resolvedPlayerId ?? '';
       if (pid) ids.add(pid);
     }
     return ids;
-  }, [gameRecommendations]);
+  }, [gameRecommendationsFiltered]);
 
   const pickableLegs = useMemo(() => {
     if (!allLinesResult) return [];
@@ -602,11 +820,11 @@ export default function MultiOptimizerPanel({
 
   useEffect(() => {
     onResultsChange?.({
-      poolSize: gameRecommendations.length,
+      poolSize: gameRecommendationsFiltered.length,
       multiCount: multis.length,
       customLegsAvailable: pickableLegs.length,
     });
-  }, [gameRecommendations.length, multis.length, pickableLegs.length, onResultsChange]);
+  }, [gameRecommendationsFiltered.length, multis.length, pickableLegs.length, onResultsChange]);
 
   return (
     <div className="space-y-4">
@@ -764,9 +982,59 @@ export default function MultiOptimizerPanel({
         )}
       </div>
 
+      {/* Player Intelligence filters — operate on the shared eligible-leg pool.
+          Affects Best Individual Legs, Suggested Multis, Build Your Own Multi,
+          Complete My Multi, Suggest Next Leg and Swap Weakest Leg alike, since
+          they all read gameRecommendationsFiltered / pickableLegs downstream. */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs font-semibold text-white">Player Intelligence Filters</span>
+          <span className="text-[10px] text-gray-500">Display-only intelligence, opt-in filtering — no probabilities are changed</span>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+            <input type="checkbox" checked={filterPositiveMatchup} onChange={e => setFilterPositiveMatchup(e.target.checked)} className="accent-emerald-500" />
+            Positive Position Edge
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+            <input type="checkbox" checked={filterPositiveEnvironment} onChange={e => setFilterPositiveEnvironment(e.target.checked)} className="accent-emerald-500" />
+            Positive Team Environment
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+            <input type="checkbox" checked={filterRoleBoost} onChange={e => setFilterRoleBoost(e.target.checked)} className="accent-emerald-500" />
+            Role Boost
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+            <input type="checkbox" checked={filterExcludeNegativeMatchup} onChange={e => setFilterExcludeNegativeMatchup(e.target.checked)} className="accent-red-500" />
+            Exclude Negative Matchups
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+            <input type="checkbox" checked={filterSufficientIntelData} onChange={e => setFilterSufficientIntelData(e.target.checked)} className="accent-cyan-500" />
+            Sufficient Intelligence Data Only
+          </label>
+        </div>
+
+        {/* Intelligence diagnostics — reconciles with the shared eligible-leg pool */}
+        <div className="mt-3 pt-3 border-t border-gray-800 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2 text-[10px]">
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Eligible Legs</p><p className="text-white font-bold">{intelligenceFilterDiagnostics.eligibleLegs}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Position Edge</p><p className="text-cyan-400 font-bold">{intelligenceFilterDiagnostics.withPositionEdge}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Team Env</p><p className="text-cyan-400 font-bold">{intelligenceFilterDiagnostics.withTeamEnvironment}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Role Intel</p><p className="text-cyan-400 font-bold">{intelligenceFilterDiagnostics.withRoleIntelligence}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With CBA Data</p><p className="text-gray-400 font-bold">{intelligenceFilterDiagnostics.withCba}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Kick-In Data</p><p className="text-gray-400 font-bold">{intelligenceFilterDiagnostics.withKickIns}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Score</p><p className="text-emerald-400 font-bold">{intelligenceFilterDiagnostics.withScore}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Missing Sufficient Data</p><p className="text-amber-400 font-bold">{intelligenceFilterDiagnostics.missingSufficientData}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Matchup</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.excludedByMatchup}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Environment</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.excludedByEnvironment}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Role</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.excludedByRole}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Data Req.</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.excludedByDataRequirement}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">After Filters</p><p className="text-white font-bold">{gameRecommendationsFiltered.filter(r => r.safeLine).length}</p></div>
+        </div>
+      </div>
+
       {/* Build Button */}
       <div className="flex items-center gap-3 flex-wrap">
-        <button onClick={handleBuild} disabled={loading || gameRecommendations.length === 0}
+        <button onClick={handleBuild} disabled={loading || gameRecommendationsFiltered.length === 0}
           className="flex items-center gap-2 px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-gray-700 disabled:text-gray-500 text-gray-950 font-bold rounded-lg text-sm transition">
           {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Target className="w-4 h-4" />}
           {loading ? 'Building…' : 'Build Game Multis'}
@@ -809,13 +1077,18 @@ export default function MultiOptimizerPanel({
       )}
 
       {/* Section A — Best Individual Legs */}
-      {gameRecommendations.length > 0 && (
+      {gameRecommendationsFiltered.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <h3 className="text-white font-semibold text-sm mb-3">Best Individual Disposal Legs</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-white font-semibold text-sm">Best Individual Disposal Legs</h3>
+            <span className="text-[10px] text-gray-500">Click a badge row to open Player Intelligence</span>
+          </div>
           <div className="space-y-2">
-            {gameRecommendations.filter(r => r.safeLine).map((rec, i) => {
+            {gameRecommendationsFiltered.filter(r => r.safeLine).map((rec, i) => {
               const fr = rec.safeLine!.freshness;
               const isStale = fr && fr.freshnessStatus !== 'CURRENT';
+              const pid = rec.safeLine!.player_id ?? rec.safeLine!.resolvedPlayerId ?? rec.playerId;
+              const intel = intelligenceByPlayer.get(pid);
               return (
                 <div key={i} className={`py-2 border-b border-gray-800/30 last:border-0 ${isStale ? 'opacity-60' : ''}`}>
                   <div className="flex items-center justify-between flex-wrap gap-2">
@@ -843,6 +1116,9 @@ export default function MultiOptimizerPanel({
                       {isStale && <span className="text-amber-500">Not eligible for automatic multis: stale or unverified data</span>}
                     </div>
                   )}
+                  <div className="mt-1.5">
+                    <IntelBadges intel={intel} onClick={() => setDrawerPlayerId(pid)} />
+                  </div>
                 </div>
               );
             })}
@@ -851,7 +1127,7 @@ export default function MultiOptimizerPanel({
       )}
 
       {/* Section A.5 — Build Your Own Multi (every genuine line, not just the safe pick) */}
-      {gameRecommendations.length > 0 && (
+      {gameRecommendationsFiltered.length > 0 && (
         <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <div className="flex items-center gap-2">
@@ -934,14 +1210,17 @@ export default function MultiOptimizerPanel({
               const isPicked = altSelectedKeys.includes(key);
               const fr = leg.row.freshness;
               const isStale = Boolean(fr && fr.freshnessStatus !== 'CURRENT');
+              const intel = intelligenceByPlayer.get(leg.playerId);
               return (
-                <button
+                <div
                   key={key}
-                  onClick={() => toggleAltLeg(leg)}
-                  disabled={isStale && !isPicked}
-                  className={`w-full text-left px-2.5 py-2 rounded-lg border transition disabled:opacity-40 disabled:cursor-not-allowed ${
-                    isPicked ? 'bg-cyan-500/10 border-cyan-500/40' : 'bg-gray-800/40 border-gray-800 hover:border-gray-700'
-                  }`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => { if (!(isStale && !isPicked)) toggleAltLeg(leg); }}
+                  onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && !(isStale && !isPicked)) toggleAltLeg(leg); }}
+                  className={`w-full text-left px-2.5 py-2 rounded-lg border transition cursor-pointer ${
+                    isStale && !isPicked ? 'opacity-40 cursor-not-allowed' : ''
+                  } ${isPicked ? 'bg-cyan-500/10 border-cyan-500/40' : 'bg-gray-800/40 border-gray-800 hover:border-gray-700'}`}
                 >
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center gap-2">
@@ -949,6 +1228,13 @@ export default function MultiOptimizerPanel({
                       <span className="text-white text-sm font-medium">{leg.playerName}</span>
                       <span className="text-gray-500 text-[10px]">{leg.team}</span>
                       <span className="text-cyan-400 text-xs">{leg.displayLabel}</span>
+                      <button
+                        onClick={e => { e.stopPropagation(); setDrawerPlayerId(leg.playerId); }}
+                        title="View Player Intelligence"
+                        className="p-0.5 rounded hover:bg-gray-700 text-gray-500 hover:text-cyan-400 transition"
+                      >
+                        <Info className="w-3 h-3" />
+                      </button>
                     </div>
                     <div className="flex items-center gap-3 text-[10px] text-gray-500">
                       <span className="text-white font-bold text-xs">${leg.odds.toFixed(2)}</span>
@@ -962,7 +1248,12 @@ export default function MultiOptimizerPanel({
                       {isStale && <span className="text-amber-500">Stale</span>}
                     </div>
                   </div>
-                </button>
+                  {intel && (
+                    <div className="mt-1.5" onClick={e => e.stopPropagation()}>
+                      <IntelBadges intel={intel} onClick={() => setDrawerPlayerId(leg.playerId)} />
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -1117,18 +1408,18 @@ export default function MultiOptimizerPanel({
 
       {/* Section B — Suggested Multis */}
       {/* Freshness summary */}
-      {gameRecommendations.length > 0 && (
+      {gameRecommendationsFiltered.length > 0 && (
         <div className="flex gap-4 text-xs">
           <span className="text-emerald-400">
-            Current players eligible for automatic multis: {gameRecommendations.filter(r => { const sl = r.safeLine; return sl && sl.freshness && sl.freshness.freshnessStatus === 'CURRENT'; }).length}
+            Current players eligible for automatic multis: {gameRecommendationsFiltered.filter(r => { const sl = r.safeLine; return sl && sl.freshness && sl.freshness.freshnessStatus === 'CURRENT'; }).length}
           </span>
           <span className="text-amber-400">
-            Stale/unverified players excluded: {gameRecommendations.filter(r => { const sl = r.safeLine; return sl && (!sl.freshness || sl.freshness.freshnessStatus !== 'CURRENT'); }).length}
+            Stale/unverified players excluded: {gameRecommendationsFiltered.filter(r => { const sl = r.safeLine; return sl && (!sl.freshness || sl.freshness.freshnessStatus !== 'CURRENT'); }).length}
           </span>
         </div>
       )}
 
-      {!loading && multis.length === 0 && !error && gameRecommendations.length > 0 && (
+      {!loading && multis.length === 0 && !error && gameRecommendationsFiltered.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center">
           <AlertCircle className="w-8 h-8 text-amber-400 mx-auto mb-2" />
           <p className="text-amber-400 font-medium text-sm">No multis generated yet.</p>
@@ -1222,6 +1513,19 @@ export default function MultiOptimizerPanel({
             </div>
           )}
         </div>
+      )}
+
+      {drawerPlayerId && (
+        <PlayerIntelligenceDrawer
+          intel={intelligenceByPlayer.get(drawerPlayerId)}
+          lines={pickableLegs.filter(l => l.playerId === drawerPlayerId).sort((a, b) => a.line - b.line || (a.selectionType === 'under' ? 1 : -1))}
+          matchName={selectedMatchId ? (matchNames[selectedMatchId] ?? selectedMatchName) : selectedMatchName}
+          selectedKeys={altSelectedKeys}
+          legKeyFn={legKey}
+          onToggleLeg={toggleAltLeg}
+          conflictMsg={altConflictMsg}
+          onClose={() => setDrawerPlayerId(null)}
+        />
       )}
     </div>
   );

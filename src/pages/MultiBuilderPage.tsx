@@ -1441,6 +1441,7 @@ export default function MultiBuilderPage() {
           onLineSafetyChange={setLineSafety}
           teamEnvMap={teamEnvMap}
           teamMatchups={teamMatchups}
+          teamStats={teamStats}
           roleTrends={roleTrends}
           onResultsChange={handlePanelResultsChange}
         />
