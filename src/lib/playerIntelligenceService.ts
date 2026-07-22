@@ -71,8 +71,11 @@ export interface PlayerIntelligence {
   cba: {
     available: boolean;
     seasonAverage: number | null;
+    last10Average: number | null;
     last5Average: number | null;
+    last3Average: number | null;
     latestValue: number | null;
+    latestRound: string | null;
     sampleSize: number;
     trend: TrendLabelType;
     reason: string;
@@ -81,8 +84,12 @@ export interface PlayerIntelligence {
   kickIns: {
     available: boolean;
     seasonAverage: number | null;
+    last10Average: number | null;
     last5Average: number | null;
+    last3Average: number | null;
     latestValue: number | null;
+    latestRound: string | null;
+    playOnPercentage: number | null;
     sampleSize: number;
     trend: TrendLabelType;
     reason: string;
@@ -297,30 +304,47 @@ function trendLabelFromChange(change: number, threshold: number, sampleSize: num
 function computeCbaIntel(entry: RoleTrendEntry | undefined): PlayerIntelligence['cba'] {
   if (!entry || entry.sampleSize === 0) {
     return {
-      available: false, seasonAverage: null, last5Average: null, latestValue: null, sampleSize: 0,
+      available: false, seasonAverage: null, last10Average: null, last5Average: null, last3Average: null,
+      latestValue: null, latestRound: null, sampleSize: 0,
       trend: 'INSUFFICIENT_DATA', reason: 'No genuine centre-bounce attendance data has been imported for this player yet.',
     };
   }
   const trend = trendLabelFromChange(entry.cbaChange, 10, entry.sampleSize);
   return {
-    available: true, seasonAverage: entry.cbaSeasonAvg, last5Average: entry.cbaLast5,
-    latestValue: entry.latestCba, sampleSize: entry.sampleSize, trend,
-    reason: `Genuine CBA data from ${entry.sampleSize} matches (source: player_role_data).`,
+    available: true,
+    seasonAverage: entry.cbaSeasonAvg,
+    last10Average: entry.cbaLast10,
+    last5Average: entry.cbaLast5,
+    last3Average: entry.cbaLast3,
+    latestValue: entry.latestCba,
+    latestRound: entry.latestRound,
+    sampleSize: entry.sampleSize,
+    trend,
+    reason: `Genuine CBA data from ${entry.sampleSize} matches (source: DFS Australia via player_role_data).`,
   };
 }
 
 function computeKickInIntel(entry: RoleTrendEntry | undefined): PlayerIntelligence['kickIns'] {
   if (!entry || entry.sampleSize === 0) {
     return {
-      available: false, seasonAverage: null, last5Average: null, latestValue: null, sampleSize: 0,
+      available: false, seasonAverage: null, last10Average: null, last5Average: null, last3Average: null,
+      latestValue: null, latestRound: null, playOnPercentage: null, sampleSize: 0,
       trend: 'INSUFFICIENT_DATA', reason: 'No genuine kick-in data has been imported for this player yet.',
     };
   }
   const trend = trendLabelFromChange(entry.kickInChange, 0.08, entry.sampleSize);
   return {
-    available: true, seasonAverage: entry.kickInSeasonShare, last5Average: entry.kickInLast5Share,
-    latestValue: entry.latestKickInShare, sampleSize: entry.sampleSize, trend,
-    reason: `Genuine kick-in share data from ${entry.sampleSize} matches (source: player_role_data).`,
+    available: true,
+    seasonAverage: entry.kickInSeasonShare,
+    last10Average: entry.kickInLast10Share,
+    last5Average: entry.kickInLast5Share,
+    last3Average: entry.kickInLast3Share,
+    latestValue: entry.latestKickInShare,
+    latestRound: entry.latestRound,
+    playOnPercentage: entry.kickInPlayOnPctSeason,
+    sampleSize: entry.sampleSize,
+    trend,
+    reason: `Genuine kick-in share data from ${entry.sampleSize} matches (source: DFS Australia via player_role_data).`,
   };
 }
 

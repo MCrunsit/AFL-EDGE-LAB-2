@@ -7,6 +7,8 @@ import { getLastBookmakerFetch, type BookmakerFetchResult } from '../lib/liveBoo
 import { dryRunStatsCheck, backfillMissingRounds, importValidatedStats, deduplicateStats, getDataStatus, recalculatePositionEdges, type StatsSyncDiagnostics, type BackfillDiagnostics, type StatsImportValidation } from '../lib/playerStatsSync';
 import { getRoundInfo } from '../lib/roundManager';
 import { testKaliConnection, syncPlayerGameStatsFromKali, syncAllMissingFromKali, dryRunKaliSync, type KaliSyncResult, type KaliConnectionTest, type SyncPriority } from '../lib/syncPlayerGameStatsFromKali';
+import { processDfsRows, importDfsRows, type DfsProcessResult, type DfsImportReport } from '../lib/dfsAustraliaImportService';
+import { loadRoleTrends } from '../lib/roleTrendService';
 
 type ImportTarget = 'players' | 'matches' | 'player_game_stats' | 'player_prop_odds' | 'fixtures';
 
@@ -795,6 +797,14 @@ export default function ImportPage() {
   const [statsImporting, setStatsImporting] = useState(false);
   const [statsImportResult, setStatsImportResult] = useState<StatsImportValidation | null>(null);
   const [dataStatus, setDataStatus] = useState<{ status: string; latestCompletedRound: string | null; latestStatRound: string | null; isStale: boolean; reasons: string[] } | null>(null);
+  // DFS Australia role-data (CBA / kick-in) import state
+  const [dfsFileRef, setDfsFileRef] = useState<File | null>(null);
+  const [dfsDryRunning, setDfsDryRunning] = useState(false);
+  const [dfsImporting, setDfsImporting] = useState(false);
+  const [dfsDryRunResult, setDfsDryRunResult] = useState<DfsProcessResult | null>(null);
+  const [dfsImportResult, setDfsImportResult] = useState<DfsImportReport | null>(null);
+  const [dfsError, setDfsError] = useState<string | null>(null);
+  const [dfsRefreshMsg, setDfsRefreshMsg] = useState<string | null>(null);
   // Kali sync state
   const [kaliTesting, setKaliTesting] = useState(false);
   const [kaliTestResult, setKaliTestResult] = useState<KaliConnectionTest | null>(null);
@@ -944,6 +954,56 @@ export default function ImportPage() {
     const season = new Date().getFullYear();
     getDataStatus(season).then(setDataStatus);
   }, []);
+
+  function handleDfsFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setDfsFileRef(file);
+    setDfsDryRunResult(null);
+    setDfsImportResult(null);
+    setDfsError(null);
+  }
+
+  async function handleDfsDryRun() {
+    if (!dfsFileRef) return;
+    setDfsDryRunning(true);
+    setDfsError(null);
+    setDfsImportResult(null);
+    try {
+      const text = await dfsFileRef.text();
+      const result = await processDfsRows(text);
+      setDfsDryRunResult(result);
+    } catch (e: any) {
+      setDfsError(e?.message ?? String(e));
+    } finally {
+      setDfsDryRunning(false);
+    }
+  }
+
+  async function handleDfsImport() {
+    if (!dfsFileRef) return;
+    setDfsImporting(true);
+    setDfsError(null);
+    try {
+      const text = await dfsFileRef.text();
+      const result = await importDfsRows(text);
+      setDfsImportResult(result);
+    } catch (e: any) {
+      setDfsError(e?.message ?? String(e));
+    } finally {
+      setDfsImporting(false);
+    }
+  }
+
+  async function handleRefreshPlayerIntelligence() {
+    setDfsRefreshMsg('Refreshing…');
+    try {
+      const map = await loadRoleTrends(2026);
+      setDfsRefreshMsg(`Role trends reloaded — ${map.size} players now have CBA/kick-in data cached. Revisit Multi Builder to see updated Player Intelligence.`);
+    } catch (e: any) {
+      setDfsRefreshMsg(`Refresh failed: ${e?.message ?? String(e)}`);
+    }
+  }
 
   async function handleKaliTest() {
     setKaliTesting(true);
@@ -1558,6 +1618,113 @@ export default function ImportPage() {
           </div>
         </div>
       )}
+
+      {/* DFS Australia Role Data (CBA / Kick-In) Import */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-3">
+        <div>
+          <h3 className="text-white font-semibold text-sm">DFS Australia CSV Import — CBA / Kick-In Data</h3>
+          <p className="text-xs text-gray-500 mt-1">
+            Upload the official DFS Australia player-game CSV to populate genuine centre-bounce attendance
+            and kick-in evidence for Player Intelligence. Never estimated from disposals or kicks — rows that
+            can't be resolved to a real player and match are rejected, not guessed.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <input
+            type="file"
+            accept=".csv"
+            onChange={handleDfsFile}
+            className="text-xs text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-gray-700 file:text-gray-300 hover:file:bg-gray-600 file:cursor-pointer"
+          />
+          <button
+            onClick={handleDfsDryRun}
+            disabled={!dfsFileRef || dfsDryRunning}
+            className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold rounded-lg text-sm transition"
+          >
+            {dfsDryRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
+            Dry Run
+          </button>
+          <button
+            onClick={handleDfsImport}
+            disabled={!dfsFileRef || dfsImporting}
+            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 disabled:text-gray-500 text-white font-semibold rounded-lg text-sm transition"
+          >
+            {dfsImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            Import Valid Rows
+          </button>
+          <button
+            onClick={handleRefreshPlayerIntelligence}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-lg text-sm transition"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Refresh Player Intelligence
+          </button>
+        </div>
+        {dfsRefreshMsg && <p className="text-xs text-cyan-400">{dfsRefreshMsg}</p>}
+        {dfsError && <p className="text-xs text-red-400">{dfsError}</p>}
+
+        {dfsDryRunResult && (
+          <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-3 space-y-2 text-xs">
+            <p className="text-white font-medium">Dry Run Results:</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div><span className="text-gray-500">Total Rows:</span> <span className="text-white font-bold">{dfsDryRunResult.report.totalRows}</span></div>
+              <div><span className="text-gray-500">Rows w/ CBA:</span> <span className="text-white font-bold">{dfsDryRunResult.report.rowsWithCba}</span></div>
+              <div><span className="text-gray-500">Rows w/ Kick-Ins:</span> <span className="text-white font-bold">{dfsDryRunResult.report.rowsWithKickIns}</span></div>
+              <div><span className="text-gray-500">Players Resolved:</span> <span className="text-emerald-400 font-bold">{dfsDryRunResult.report.playersResolved}</span></div>
+              <div><span className="text-gray-500">Matches Resolved:</span> <span className="text-emerald-400 font-bold">{dfsDryRunResult.report.matchesResolved}</span></div>
+              <div><span className="text-gray-500">Ready to Import:</span> <span className="text-emerald-400 font-bold">{dfsDryRunResult.report.readyToImport}</span></div>
+              <div><span className="text-gray-500">Rejected:</span> <span className="text-amber-400 font-bold">{dfsDryRunResult.report.rejectedCount}</span></div>
+              <div><span className="text-gray-500">Round Range:</span> <span className="text-white font-bold">{dfsDryRunResult.report.earliestRound}–{dfsDryRunResult.report.latestRound}</span></div>
+            </div>
+            {Object.keys(dfsDryRunResult.report.rejectionReasons).length > 0 && (
+              <div>
+                <p className="text-gray-500 mb-1">Rejection reasons:</p>
+                <div className="space-y-0.5">
+                  {Object.entries(dfsDryRunResult.report.rejectionReasons).sort((a, b) => b[1] - a[1]).map(([reason, count]) => (
+                    <div key={reason} className="flex justify-between text-amber-400">
+                      <span className="truncate pr-2">{reason}</span>
+                      <span className="shrink-0">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {dfsDryRunResult.rejected.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-red-400">View rejected rows ({dfsDryRunResult.rejected.length})</summary>
+                <div className="max-h-40 overflow-y-auto mt-1 space-y-0.5">
+                  {dfsDryRunResult.rejected.slice(0, 100).map((r, i) => (
+                    <p key={i} className="text-red-400 text-[10px]">
+                      R{r.row.round} {r.row.player} ({r.row.teamCode} vs {r.row.opponentCode}): {r.reason}
+                    </p>
+                  ))}
+                  {dfsDryRunResult.rejected.length > 100 && <p className="text-gray-600 text-[10px]">...and {dfsDryRunResult.rejected.length - 100} more</p>}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
+
+        {dfsImportResult && (
+          <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-3 space-y-2 text-xs">
+            <p className="text-white font-medium">Import Results:</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div><span className="text-gray-500">Total Rows:</span> <span className="text-white font-bold">{dfsImportResult.totalRows}</span></div>
+              <div><span className="text-gray-500">Inserted:</span> <span className="text-emerald-400 font-bold">{dfsImportResult.inserted}</span></div>
+              <div><span className="text-gray-500">Updated:</span> <span className="text-blue-400 font-bold">{dfsImportResult.updated}</span></div>
+              <div><span className="text-gray-500">Rejected:</span> <span className="text-amber-400 font-bold">{dfsImportResult.rejectedCount}</span></div>
+              <div><span className="text-gray-500">Latest Round:</span> <span className="text-white font-bold">{dfsImportResult.latestRound || '—'}</span></div>
+            </div>
+          </div>
+        )}
+
+        <p className="text-[10px] text-gray-600">
+          Expected headers: player, team, opponent, year, round, ..., cbas, kickins, kickinsPlayon, tog.
+          Upserts by player_id + match_id into player_role_data; source recorded as "DFS Australia".
+          Blank cells are stored as null, never zero. Round 0 (pre-season) is excluded.
+        </p>
+      </div>
 
       {/* Match Odds Sync Section */}
       <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 border border-blue-500/30 rounded-xl p-6">

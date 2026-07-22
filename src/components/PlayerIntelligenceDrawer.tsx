@@ -126,8 +126,12 @@ export default function PlayerIntelligenceDrawer({
               {intel.cba.available ? (
                 <div className="text-[10px] text-gray-400 space-y-0.5">
                   <p>Season: {fmtNum(intel.cba.seasonAverage)}</p>
+                  <p>Last 10: {fmtNum(intel.cba.last10Average)}</p>
                   <p>Last 5: {fmtNum(intel.cba.last5Average)}</p>
+                  <p>Last 3: {fmtNum(intel.cba.last3Average)}</p>
                   <p>Latest: {fmtNum(intel.cba.latestValue)}</p>
+                  <p>Latest round: {intel.cba.latestRound ? `Round ${intel.cba.latestRound}` : 'Unknown'}</p>
+                  <p>Sample: {intel.cba.sampleSize} matches</p>
                   <p>Trend: {intel.cba.trend.replace(/_/g, ' ')}</p>
                 </div>
               ) : unavailable()}
@@ -137,8 +141,13 @@ export default function PlayerIntelligenceDrawer({
               {intel.kickIns.available ? (
                 <div className="text-[10px] text-gray-400 space-y-0.5">
                   <p>Season: {fmtNum(intel.kickIns.seasonAverage, 2)}</p>
+                  <p>Last 10: {fmtNum(intel.kickIns.last10Average, 2)}</p>
                   <p>Last 5: {fmtNum(intel.kickIns.last5Average, 2)}</p>
+                  <p>Last 3: {fmtNum(intel.kickIns.last3Average, 2)}</p>
                   <p>Latest: {fmtNum(intel.kickIns.latestValue, 2)}</p>
+                  <p>Latest round: {intel.kickIns.latestRound ? `Round ${intel.kickIns.latestRound}` : 'Unknown'}</p>
+                  <p>Play-on %: {intel.kickIns.playOnPercentage !== null ? `${Math.round(intel.kickIns.playOnPercentage * 100)}%` : 'Insufficient data'}</p>
+                  <p>Sample: {intel.kickIns.sampleSize} matches</p>
                   <p>Trend: {intel.kickIns.trend.replace(/_/g, ' ')}</p>
                 </div>
               ) : unavailable()}
