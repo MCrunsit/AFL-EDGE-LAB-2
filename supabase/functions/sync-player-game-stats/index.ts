@@ -449,7 +449,7 @@ Deno.serve(async (req: Request) => {
         for (;;) {
           const { data: page, error } = await supabase
             .from("player_game_stats")
-            .select("id, player_id, player_name, match_id, match_date, season, round, team, opponent, venue, disposals, marks, tackles, goals, hitouts, source, contested_possessions, uncontested_possessions")
+            .select("id, player_id, player_name, match_id, match_date, season, round, team, opponent, venue, disposals, marks, tackles, goals, hitouts, source, contested_possessions, uncontested_possessions, effective_disposals, disposal_efficiency_pct, intercepts, time_on_ground_pct, metres_gained")
             .in("match_id", targetMatchIds)
             .order("id")
             .range(offset, offset + pageSize - 1);
@@ -529,9 +529,16 @@ Deno.serve(async (req: Request) => {
             const key = `${dbMatch.id}|${normName}`;
             const existing = existingIndex.get(key);
 
-            // Read fields defensively — camelCase (Kali's usual convention) first, snake_case fallback
+            // Read fields defensively — camelCase (Kali's usual convention) first, snake_case fallback.
+            // NOTE: total_possessions is a Postgres GENERATED column (confirmed live) — never write to
+            // it directly, Postgres derives it from contested_possessions + uncontested_possessions.
             const cp = ar.contestedPossessions ?? ar.contested_possessions ?? null;
             const up = ar.uncontestedPossessions ?? ar.uncontested_possessions ?? null;
+            const effDisp = ar.effectiveDisposals ?? ar.effective_disposals ?? null;
+            const dispEff = ar.disposalEfficiency ?? ar.disposal_efficiency ?? ar.disposalEfficiencyPct ?? ar.disposal_efficiency_pct ?? null;
+            const intercepts = ar.intercepts ?? null;
+            const tog = ar.timeOnGroundPercentage ?? ar.timeOnGroundPct ?? ar.time_on_ground_percentage ?? ar.time_on_ground_pct ?? null;
+            const metresGained = ar.metresGained ?? ar.metres_gained ?? null;
 
             if (!existing) {
               advResult.rows_unresolved++;
@@ -540,14 +547,19 @@ Deno.serve(async (req: Request) => {
               }
               continue;
             }
-            if (!force && existing.contested_possessions != null && existing.uncontested_possessions != null) {
+            const existingComplete = existing.contested_possessions != null && existing.uncontested_possessions != null
+              && existing.effective_disposals != null && existing.disposal_efficiency_pct != null
+              && existing.intercepts != null && existing.time_on_ground_pct != null;
+            if (!force && existingComplete) {
               advResult.rows_already_complete_skipped++;
               continue;
             }
-            if (cp == null && up == null) {
+            if (cp == null && up == null && effDisp == null && dispEff == null && intercepts == null && tog == null && metresGained == null) {
               // Kali genuinely has no advanced data for this player-game — leave null, don't fabricate 0
               continue;
             }
+
+            const pick = (newVal: any, oldVal: any) => (newVal != null ? newVal : (oldVal ?? null));
 
             updatesBatch.push({
               id: existing.id,
@@ -566,9 +578,13 @@ Deno.serve(async (req: Request) => {
               goals: existing.goals,
               hitouts: existing.hitouts,
               source: existing.source,
-              contested_possessions: cp,
-              uncontested_possessions: up,
-              total_possessions: (cp != null && up != null) ? cp + up : null,
+              contested_possessions: pick(cp, existing.contested_possessions),
+              uncontested_possessions: pick(up, existing.uncontested_possessions),
+              effective_disposals: pick(effDisp, existing.effective_disposals),
+              disposal_efficiency_pct: pick(dispEff, existing.disposal_efficiency_pct),
+              intercepts: pick(intercepts, existing.intercepts),
+              time_on_ground_pct: pick(tog, existing.time_on_ground_pct),
+              metres_gained: pick(metresGained, existing.metres_gained),
             });
           }
         } catch (e: any) {
