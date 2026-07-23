@@ -274,17 +274,33 @@ Deno.serve(async (req: Request) => {
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
   try {
-    // Load all existing players for lookup
-    const { data: allPlayers, error: playersError } = await supabase
-      .from("players")
-      .select("id, name, team");
-
-    if (playersError) {
-      result.errors.push(`Failed to load players: ${playersError.message}`);
-      return new Response(JSON.stringify(result), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    // Load all existing players for lookup. Fully paginated — an unpaginated
+    // select here was silently capped at Supabase's 1000-row default out of
+    // ~2850 real players, making ~65% of players invisible to name/team
+    // matching during this backfill (the same bug already fixed in the
+    // sync-player-game-stats function's equivalent query).
+    const allPlayers: any[] = [];
+    {
+      const pageSize = 1000;
+      let offset = 0;
+      for (;;) {
+        const { data: page, error: playersError } = await supabase
+          .from("players")
+          .select("id, name, team")
+          .order("id")
+          .range(offset, offset + pageSize - 1);
+        if (playersError) {
+          result.errors.push(`Failed to load players: ${playersError.message}`);
+          return new Response(JSON.stringify(result), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        if (!page || page.length === 0) break;
+        allPlayers.push(...page);
+        if (page.length < pageSize) break;
+        offset += pageSize;
+      }
     }
 
     const playersByNormName = new Map<string, any[]>();

@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { POSITION_GROUPS, POSITION_GROUP_ALIASES } from './types';
+import { fetchAllRows } from './supabasePagination';
 
 export type StatType = 'disposals' | 'marks' | 'tackles' | 'goals' | 'hitouts';
 
@@ -445,12 +446,17 @@ export async function calculatePositionEdges(season?: number): Promise<{ cache: 
     edgesByPositionGroup: {},
   };
 
-  // Fetch all player_game_stats (not limited to current season — use all available data)
-  const { data: stats, error: statsError } = await supabase
-    .from('player_game_stats')
-    .select('player_id, opponent, match_id, team, match_date, disposals, marks, tackles, goals, hitouts');
-
-  if (statsError || !stats) return { cache, diagnostics };
+  // Fetch all player_game_stats (not limited to current season — use all available data).
+  // Fully paginated — this table has ~7000+ rows and an unpaginated select here
+  // was silently capped at Supabase's 1000-row default, undercounting the
+  // sample for Position Edge across most players.
+  let stats: any[];
+  try {
+    stats = await fetchAllRows<any>(supabase, 'player_game_stats',
+      'player_id, opponent, match_id, team, match_date, disposals, marks, tackles, goals, hitouts');
+  } catch {
+    return { cache, diagnostics };
+  }
   diagnostics.statsRowsFetched = stats.length;
 
   // Fetch players with position_group
