@@ -281,6 +281,32 @@ function resolvePlayer(
   return null;
 }
 
+/** Fully paginates a Supabase select past the 1000-row default cap. Used
+ * anywhere a query result could exceed 1000 rows (players, player_game_stats)
+ * — a single unpaginated select silently truncates and was the root cause of
+ * multiple resolution/coverage bugs in this function. */
+async function fetchAllRows(
+  supabase: ReturnType<typeof createClient>,
+  table: string,
+  select: string,
+  applyFilters?: (q: any) => any,
+  pageSize = 1000,
+): Promise<any[]> {
+  const rows: any[] = [];
+  let offset = 0;
+  for (;;) {
+    let q = supabase.from(table).select(select).order("id").range(offset, offset + pageSize - 1);
+    if (applyFilters) q = applyFilters(q);
+    const { data: page, error } = await q;
+    if (error) throw new Error(`fetchAllRows(${table}) failed: ${error.message}`);
+    if (!page || page.length === 0) break;
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return rows;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -463,7 +489,7 @@ Deno.serve(async (req: Request) => {
       advResult.debug_log.push(`Loaded ${existingRows.length} existing player_game_stats rows across ${targetMatchIds.length} matches`);
 
       // ─── Players table, for rows where player_name is missing on the stored row ───
-      const { data: allPlayers } = await supabase.from("players").select("id, name, team");
+      const allPlayers = await fetchAllRows(supabase, "players", "id, name, team");
       const playerById = new Map<string, any>();
       for (const p of allPlayers ?? []) playerById.set(p.id, p);
 
@@ -661,9 +687,7 @@ Deno.serve(async (req: Request) => {
     }
 
     // ─── Load all players for matching ───
-    const { data: ourPlayers } = await supabase
-      .from("players")
-      .select("id, name, team");
+    const ourPlayers = await fetchAllRows(supabase, "players", "id, name, team");
 
     // Build multiple lookup maps
     const playersByNormName = new Map<string, any>();
@@ -734,17 +758,15 @@ Deno.serve(async (req: Request) => {
     // ─── Check completeness for each completed match ───
     const completedMatchIds = new Set(completedMatches.map((m: any) => m.id));
 
-    const { data: existingStats } = await supabase
-      .from("player_game_stats")
-      .select("match_id, team")
-      .in("match_id", [...completedMatchIds]);
+    const existingStats = await fetchAllRows(
+      supabase, "player_game_stats", "match_id, team",
+      (q) => q.in("match_id", [...completedMatchIds]),
+    );
 
     const statsByMatch = new Map<string, number>();
-    if (existingStats) {
-      for (const s of existingStats) {
-        if (!s.match_id) continue;
-        statsByMatch.set(s.match_id, (statsByMatch.get(s.match_id) ?? 0) + 1);
-      }
+    for (const s of existingStats) {
+      if (!s.match_id) continue;
+      statsByMatch.set(s.match_id, (statsByMatch.get(s.match_id) ?? 0) + 1);
     }
 
     const matchesToSync: any[] = [];
@@ -1059,17 +1081,15 @@ Deno.serve(async (req: Request) => {
       }
 
       // ─── Re-check missing matches after sync ───
-      const { data: existingAfter } = await supabase
-        .from("player_game_stats")
-        .select("match_id")
-        .in("match_id", [...completedMatchIds]);
+      const existingAfter = await fetchAllRows(
+        supabase, "player_game_stats", "match_id",
+        (q) => q.in("match_id", [...completedMatchIds]),
+      );
 
       const statsAfterByMatch = new Map<string, number>();
-      if (existingAfter) {
-        for (const s of existingAfter) {
-          if (!s.match_id) continue;
-          statsAfterByMatch.set(s.match_id, (statsAfterByMatch.get(s.match_id) ?? 0) + 1);
-        }
+      for (const s of existingAfter) {
+        if (!s.match_id) continue;
+        statsAfterByMatch.set(s.match_id, (statsAfterByMatch.get(s.match_id) ?? 0) + 1);
       }
 
       let stillMissing = 0;
