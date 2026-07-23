@@ -342,6 +342,139 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // ─── ACTION: inspect_kali_raw ───
+    if (action === "inspect_kali_raw") {
+      // Read-only. Zero database writes. Fetches one real match's raw Kali
+      // response and returns field names so callers can confirm what exists.
+      try {
+        // Find the most recent completed 2026 match that has an api_match_id
+        const { data: recentMatches, error: matchErr } = await supabase
+          .from("matches")
+          .select("id, api_match_id, round, home_team, away_team, match_date")
+          .eq("season", 2026)
+          .not("api_match_id", "is", null)
+          .order("match_date", { ascending: false })
+          .limit(10);
+
+        if (matchErr) {
+          result.errors.push(`DB error fetching matches: ${matchErr.message}`);
+          return new Response(JSON.stringify(result), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        const match = (recentMatches ?? []).find((m: any) => m.api_match_id);
+        if (!match) {
+          result.errors.push("No 2026 match with api_match_id found in database");
+          return new Response(JSON.stringify(result), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        const localMatchId = match.id;
+        const kaliMatchId = match.api_match_id;
+
+        // Try advanced-player-stats first, fall back to player-stats
+        const endpoints = [
+          `/advanced-player-stats?matchId=${kaliMatchId}&limit=1`,
+          `/player-stats?matchId=${kaliMatchId}&limit=1`,
+        ];
+
+        let lastEndpoint = "";
+        let lastHttpStatus = 0;
+        let rawData: any = null;
+
+        for (const ep of endpoints) {
+          lastEndpoint = `${KALI_BASE}${ep}`;
+          try {
+            const url = `${KALI_BASE}${ep}`;
+            const resp = await fetch(url, {
+              headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "Accept": "application/json",
+              },
+            });
+            lastHttpStatus = resp.status;
+            result.requests_used += 1;
+            const remaining = resp.headers.get("x-ratelimit-remaining");
+            if (remaining) result.requests_remaining = parseInt(remaining, 10);
+
+            if (resp.ok) {
+              rawData = await resp.json();
+              break;
+            }
+            // Non-200 — try next endpoint
+          } catch (fetchErr: any) {
+            result.errors.push(`Fetch error for ${ep}: ${fetchErr.message}`);
+          }
+        }
+
+        if (!rawData) {
+          result.errors.push(`No successful response from any endpoint (last status: ${lastHttpStatus})`);
+          return new Response(JSON.stringify(result), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        // Extract first player record
+        const players: any[] = Array.isArray(rawData)
+          ? rawData
+          : Array.isArray(rawData?.data)
+          ? rawData.data
+          : [];
+
+        const firstPlayer = players[0] ?? null;
+        const allFieldNames: string[] = firstPlayer ? Object.keys(firstPlayer) : [];
+
+        // Check for specific fields — no inference, no calculation
+        const fieldsOfInterest = [
+          "disposals",
+          "contestedPossessions",
+          "uncontestedPossessions",
+          "totalPossessions",
+          // common snake_case variants
+          "contested_possessions",
+          "uncontested_possessions",
+          "total_possessions",
+        ];
+        const fieldPresence: Record<string, boolean> = {};
+        for (const f of fieldsOfInterest) {
+          fieldPresence[f] = allFieldNames.includes(f);
+        }
+
+        result.success = true;
+        result.kali_connected = true;
+        result.kali_status = "connected";
+
+        const inspectPayload = {
+          endpoint_requested: lastEndpoint,
+          http_status: lastHttpStatus,
+          match_id_used: localMatchId,
+          kali_match_id: kaliMatchId,
+          match_label: `${match.home_team} vs ${match.away_team} — ${match.round} (${match.match_date})`,
+          top_level_response_keys: Object.keys(rawData),
+          total_player_records_returned: players.length,
+          first_player_record: firstPlayer,
+          all_field_names_from_first_player: allFieldNames,
+          field_presence: fieldPresence,
+        };
+
+        return new Response(JSON.stringify({ ...result, inspect: inspectPayload }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (e: any) {
+        result.errors.push(`inspect_kali_raw error: ${e.message}`);
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
     // ─── Load all players for matching ───
     const { data: ourPlayers } = await supabase
       .from("players")
