@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Shield, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target, Link as LinkIcon } from 'lucide-react';
+import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Shield, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target, Link as LinkIcon, ChevronDown, ChevronRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { extractStatType } from '../lib/oddsNormalizer';
 import { getPositionEdgeColor, type PositionEdgeResult, type VenueEdgeResult, type OpponentEdgeResult } from '../lib/positionEdge';
@@ -111,6 +111,11 @@ export default function MultiBuilderPage() {
     setPanelResult(info);
   }, []);
   const [showAdvancedDiagnostics, setShowAdvancedDiagnostics] = useState(false);
+  // Quick Builder / Advanced Analysis split — filter tuning, market selection,
+  // position/venue/opponent edge and tag-risk settings are all advanced tools
+  // that most sessions never need to touch; collapsed by default so the page
+  // isn't a wall of settings before you even pick a match.
+  const [showFilterSettings, setShowFilterSettings] = useState(false);
   const [lineSafety, setLineSafety] = useState<LineSafetyMode>('safe');
   const [selectedGameMatchId, setSelectedGameMatchId] = useState<string | null>(null);
   const [teamEnvMap, setTeamEnvMap] = useState<TeamEnvironmentMap | undefined>(undefined);
@@ -1287,6 +1292,24 @@ export default function MultiBuilderPage() {
           </div>
         )}
 
+        {/* Quick Builder / Advanced Analysis toggle — filter tuning, market
+            selection, position/venue/opponent edge and tag-risk settings all
+            live behind this. Quick Builder essentials (Multi Mode, Model
+            Coverage, match selection, target legs, risk, Build) stay visible
+            above regardless of this toggle. */}
+        <button
+          onClick={() => setShowFilterSettings(!showFilterSettings)}
+          className="w-full flex items-center justify-between border-t border-gray-800 pt-3 text-left text-xs text-gray-400 hover:text-gray-200 transition"
+        >
+          <span className="font-medium">
+            Advanced Analysis
+            {!showFilterSettings && <span className="text-gray-600 font-normal ml-2">— odds/sample filters, market selection, position/venue/opponent edge, tag risk</span>}
+          </span>
+          {showFilterSettings ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        </button>
+
+        {showFilterSettings && (
+        <>
         {/* Standard Filters */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
@@ -1437,6 +1460,8 @@ export default function MultiBuilderPage() {
             <span className="text-gray-600">(default: OFF)</span>
           </label>
         </div>
+        </>
+        )}
       </div>
 
       {/* Smart Multi Builder — single unified builder */}

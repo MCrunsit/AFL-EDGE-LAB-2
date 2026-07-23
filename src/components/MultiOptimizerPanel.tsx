@@ -1100,7 +1100,8 @@ export default function MultiOptimizerPanel({
         <button onClick={() => setShowAdvanced(!showAdvanced)}
           className="mt-3 flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition">
           {showAdvanced ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          Advanced Settings
+          Advanced Analysis
+          {!showAdvanced && <span className="text-gray-600 normal-case">— odds range, intelligence filters, application mode, diagnostics</span>}
         </button>
         {showAdvanced && (
           <div className="mt-2 pt-3 border-t border-gray-800 grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1119,7 +1120,11 @@ export default function MultiOptimizerPanel({
       {/* Player Intelligence filters — operate on the shared eligible-leg pool.
           Affects Best Individual Legs, Suggested Multis, Build Your Own Multi,
           Complete My Multi, Suggest Next Leg and Swap Weakest Leg alike, since
-          they all read gameRecommendationsFiltered / pickableLegs downstream. */}
+          they all read gameRecommendationsFiltered / pickableLegs downstream.
+          Collapsed behind the same "Advanced Settings" toggle above — the
+          defaults (Rank Only, All Valid Players) already do the right thing
+          without opening this, per the Quick Builder / Advanced Analysis split. */}
+      {showAdvanced && (
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs font-semibold text-white">Player Intelligence Filters</span>
@@ -1197,6 +1202,7 @@ export default function MultiOptimizerPanel({
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">After Filters</p><p className="text-white font-bold">{gameRecommendationsFiltered.filter(r => r.safeLine).length}</p></div>
         </div>
       </div>
+      )}
 
       {/* Build Button */}
       <div className="flex items-center gap-3 flex-wrap">
