@@ -21,10 +21,10 @@ export interface MultiOptimizerSettings {
 
 export const GAME_MULTI_PRESET: MultiOptimizerSettings = {
   preset: 'gameMulti',
-  targetOdds: 2.00,
+  targetOdds: 1.90,
   preferredMinOdds: 1.80,
-  preferredMaxOdds: 2.20,
-  hardMaxOdds: 2.50,
+  preferredMaxOdds: 2.00,
+  hardMaxOdds: 2.10,
   preferredLegs: 4,
   fallbackLegs: 3,
   maxLegsPerMatch: 4,
