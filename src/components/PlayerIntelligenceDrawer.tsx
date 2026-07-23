@@ -144,6 +144,90 @@ function VerifyPlayerData({ playerId }: { playerId: string }) {
   );
 }
 
+/** Phase 19 — "Report Incorrect Data." Submits a report row for later human
+ * review; never modifies source data itself. */
+function ReportIncorrectData({ playerId, matchId }: { playerId: string; matchId: string | null }) {
+  const [open, setOpen] = useState(false);
+  const [field, setField] = useState('');
+  const [currentValue, setCurrentValue] = useState('');
+  const [suggestedValue, setSuggestedValue] = useState('');
+  const [note, setNote] = useState('');
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'submitted' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  async function submit() {
+    if (!field.trim()) return;
+    setStatus('submitting');
+    setErrorMsg(null);
+    const { error } = await supabase.from('data_correction_reports').insert({
+      player_id: playerId,
+      match_id: matchId,
+      field: field.trim(),
+      current_value: currentValue.trim() || null,
+      suggested_value: suggestedValue.trim() || null,
+      note: note.trim() || null,
+    });
+    if (error) {
+      setStatus('error');
+      setErrorMsg(error.message);
+    } else {
+      setStatus('submitted');
+    }
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between text-left">
+        <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400" /> Report Incorrect Data
+        </span>
+        {open ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+      </button>
+      {open && (
+        <div className="mt-3 pt-3 border-t border-gray-800 space-y-2">
+          {status === 'submitted' ? (
+            <p className="text-[11px] text-emerald-400 flex items-center gap-1.5"><Check className="w-3 h-3" /> Report submitted for review. Source data has not been changed.</p>
+          ) : (
+            <>
+              <div>
+                <label className="text-[10px] text-gray-500 uppercase">Field</label>
+                <input value={field} onChange={e => setField(e.target.value)} placeholder="e.g. CBA count, kick-in share, latest round"
+                  className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] text-gray-500 uppercase">Current value</label>
+                  <input value={currentValue} onChange={e => setCurrentValue(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+                </div>
+                <div>
+                  <label className="text-[10px] text-gray-500 uppercase">Suggested value</label>
+                  <input value={suggestedValue} onChange={e => setSuggestedValue(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+                </div>
+              </div>
+              <div>
+                <label className="text-[10px] text-gray-500 uppercase">Note</label>
+                <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+                  className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+              </div>
+              {status === 'error' && <p className="text-[10px] text-red-400">Failed to submit: {errorMsg}</p>}
+              <button
+                onClick={submit}
+                disabled={!field.trim() || status === 'submitting'}
+                className="w-full bg-amber-600 hover:bg-amber-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-[11px] font-medium rounded px-3 py-1.5 transition"
+              >
+                {status === 'submitting' ? 'Submitting…' : 'Submit Report'}
+              </button>
+              <p className="text-[9px] text-gray-600">This only logs a report for review — it never changes stored data automatically.</p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PlayerIntelligenceDrawer({
   intel, lines, matchName, selectedKeys, legKeyFn, onToggleLeg, conflictMsg, onClose,
 }: Props) {
@@ -333,6 +417,7 @@ export default function PlayerIntelligenceDrawer({
           )}
 
           <VerifyPlayerData playerId={intel.playerId} />
+          <ReportIncorrectData playerId={intel.playerId} matchId={intel.matchId} />
 
           {/* Genuine lines — add to slip */}
           <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-3">
