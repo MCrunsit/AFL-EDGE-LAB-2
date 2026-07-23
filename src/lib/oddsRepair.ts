@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { fetchAllRows } from './supabasePagination';
 
 export interface RepairNoStatsResult {
   oddsRowsChecked: number;
@@ -128,12 +129,15 @@ export async function repairNoStatsOddsLinks(matchId: string): Promise<RepairNoS
          normalizeTeam((matchData as Record<string, unknown>).away_team as string)]
       : [];
 
-    // Fetch all players with matching normalized names
-    const { data: allPlayers, error: playersError } = await supabase
-      .from('players')
-      .select('id, name, team');
-
-    if (playersError || !allPlayers) {
+    // Fetch all players with matching normalized names. Fully paginated —
+    // an unpaginated select here was silently capped at Supabase's 1000-row
+    // default out of ~2850 real players, causing false "no match" results
+    // in this exact player-link repair tool for any player outside that
+    // truncated subset.
+    let allPlayers: { id: string; name: string; team: string }[];
+    try {
+      allPlayers = await fetchAllRows(supabase, 'players', 'id, name, team');
+    } catch {
       result.errors++;
       return result;
     }
@@ -284,10 +288,10 @@ export async function fetchPlayerModelCoverage(
     playerMap.get(key)!.oddsRows.push(row);
   }
 
-  // Fetch all players for name resolution
-  const { data: allPlayers } = await supabase
-    .from('players')
-    .select('id, name, team');
+  // Fetch all players for name resolution. Fully paginated (see comment above).
+  const allPlayers = await fetchAllRows<{ id: string; name: string; team: string }>(
+    supabase, 'players', 'id, name, team',
+  );
 
   const playersById = new Map<string, { name: string; team: string }>();
   if (allPlayers) {

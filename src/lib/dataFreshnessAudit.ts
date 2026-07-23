@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { normalizeTeamName } from './positionEdge';
 import { normalizeVenueKey } from './matchupEdge';
+import { fetchAllRows } from './supabasePagination';
 
 export type FreshnessStatus =
   | 'Fresh'
@@ -245,14 +246,18 @@ export async function getPlayerStatsBatched(playerIds: string[]): Promise<Map<st
   const result = new Map<string, StatGameRow[]>();
   if (playerIds.length === 0) return result;
 
-  // Query 1: fetch all stats for all players at once
-  const { data: allStats } = await supabase
-    .from('player_game_stats')
-    .select('player_id, match_id, match_date, team, opponent, venue, disposals, marks, tackles, goals, hitouts')
-    .in('player_id', playerIds)
-    .order('match_date', { ascending: false });
+  // Query 1: fetch all stats for all players at once. Fully paginated — with
+  // potentially hundreds of players' full multi-season history, this could
+  // exceed Supabase's 1000-row default, silently dropping stats for whoever
+  // fell outside the truncated set — ironic given this powers the Data
+  // Freshness Audit page itself.
+  const allStats = await fetchAllRows<StatGameRow>(
+    supabase, 'player_game_stats',
+    'player_id, match_id, match_date, team, opponent, venue, disposals, marks, tackles, goals, hitouts',
+    (q) => q.in('player_id', playerIds),
+  );
 
-  if (!allStats || allStats.length === 0) return result;
+  if (allStats.length === 0) return result;
 
   // Collect all match_ids for a single batch query
   const allMatchIds = new Set<string>();

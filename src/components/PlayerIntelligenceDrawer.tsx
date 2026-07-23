@@ -1,6 +1,8 @@
-import { X, Check, AlertTriangle, TrendingUp, Info } from 'lucide-react';
+import { useState } from 'react';
+import { X, Check, AlertTriangle, TrendingUp, Info, ShieldCheck, ChevronDown, ChevronRight } from 'lucide-react';
 import type { PlayerIntelligence } from '../lib/playerIntelligenceService';
 import type { PullEmLeg } from '../lib/pullEmMultiOptimizer';
+import { supabase } from '../lib/supabase';
 
 interface Props {
   intel: PlayerIntelligence | undefined;
@@ -23,6 +25,207 @@ function fmtNum(v: number | null, digits = 1): string {
 
 function unavailable(text = 'Insufficient data') {
   return <span className="text-gray-600 italic">{text}</span>;
+}
+
+interface VerifyRow {
+  round: string | null;
+  match_date: string | null;
+  source: string | null;
+  value: string;
+}
+
+/** Phase 19 — lets the user directly inspect the last 5 stored rows behind
+ * this player's form/advanced/CBA/kick-in figures, straight from the source
+ * tables, rather than trusting the computed summary alone. */
+function VerifyPlayerData({ playerId }: { playerId: string }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [formRows, setFormRows] = useState<VerifyRow[]>([]);
+  const [advancedRows, setAdvancedRows] = useState<VerifyRow[]>([]);
+  const [cbaRows, setCbaRows] = useState<VerifyRow[]>([]);
+  const [kickInRows, setKickInRows] = useState<VerifyRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load() {
+    if (loaded || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const [statsRes, roleRes] = await Promise.all([
+        supabase
+          .from('player_game_stats')
+          .select('round, match_date, disposals, contested_possessions, uncontested_possessions, source')
+          .eq('player_id', playerId)
+          .order('match_date', { ascending: false })
+          .limit(5),
+        supabase
+          .from('player_role_data')
+          .select('round, cba_count, kick_in_count, source, updated_at')
+          .eq('player_id', playerId)
+          .limit(1000), // small per-player set; sorted client-side by round below
+      ]);
+
+      if (statsRes.error) throw statsRes.error;
+      if (roleRes.error) throw roleRes.error;
+
+      const stats = statsRes.data ?? [];
+      setFormRows(stats.map(r => ({ round: r.round, match_date: r.match_date, source: r.source, value: `${r.disposals ?? '—'} disposals` })));
+      setAdvancedRows(stats.map(r => ({
+        round: r.round, match_date: r.match_date, source: r.source,
+        value: r.contested_possessions != null && r.uncontested_possessions != null
+          ? `${r.contested_possessions} CP / ${r.uncontested_possessions} UP` : 'No advanced data',
+      })));
+
+      const roleSorted = [...(roleRes.data ?? [])].sort((a, b) => {
+        const ra = parseInt(a.round ?? '', 10), rb = parseInt(b.round ?? '', 10);
+        if (!Number.isNaN(ra) && !Number.isNaN(rb)) return rb - ra;
+        return (b.updated_at ?? '').localeCompare(a.updated_at ?? '');
+      }).slice(0, 5);
+      setCbaRows(roleSorted.map(r => ({ round: r.round, match_date: null, source: r.source, value: r.cba_count != null ? `${r.cba_count} attendances` : 'No data' })));
+      setKickInRows(roleSorted.map(r => ({ round: r.round, match_date: null, source: r.source, value: r.kick_in_count != null ? `${r.kick_in_count} kick-ins` : 'No data' })));
+
+      setLoaded(true);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function Rows({ rows, label }: { rows: VerifyRow[]; label: string }) {
+    return (
+      <div>
+        <p className="text-[10px] text-gray-500 uppercase mb-1">{label}</p>
+        {rows.length === 0 ? (
+          <p className="text-[10px] text-gray-600 italic">No rows found for this player.</p>
+        ) : (
+          <div className="space-y-1">
+            {rows.map((r, i) => (
+              <div key={i} className="flex items-center justify-between text-[10px] bg-gray-800/60 rounded px-2 py-1">
+                <span className="text-gray-400">{r.round ? `Round ${r.round}` : 'Round —'}{r.match_date ? ` · ${r.match_date}` : ''}</span>
+                <span className="text-white">{r.value}</span>
+                <span className="text-gray-600">{r.source ?? 'unknown'}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+      <button
+        onClick={() => { setOpen(!open); if (!open) load(); }}
+        className="w-full flex items-center justify-between text-left"
+      >
+        <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+          <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" /> Verify Player Data
+        </span>
+        {open ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+      </button>
+      {open && (
+        <div className="mt-3 pt-3 border-t border-gray-800 space-y-3">
+          {loading && <p className="text-[10px] text-gray-500">Loading source rows…</p>}
+          {error && <p className="text-[10px] text-red-400">Error loading source data: {error}</p>}
+          {loaded && (
+            <>
+              <Rows rows={formRows} label="Form data (player_game_stats)" />
+              <Rows rows={advancedRows} label="Advanced data (contested/uncontested possessions)" />
+              <Rows rows={cbaRows} label="CBA data (player_role_data)" />
+              <Rows rows={kickInRows} label="Kick-in data (player_role_data)" />
+              <p className="text-[9px] text-gray-600">Direct read from source tables — bypasses computed averages/caches.</p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Phase 19 — "Report Incorrect Data." Submits a report row for later human
+ * review; never modifies source data itself. */
+function ReportIncorrectData({ playerId, matchId }: { playerId: string; matchId: string | null }) {
+  const [open, setOpen] = useState(false);
+  const [field, setField] = useState('');
+  const [currentValue, setCurrentValue] = useState('');
+  const [suggestedValue, setSuggestedValue] = useState('');
+  const [note, setNote] = useState('');
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'submitted' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  async function submit() {
+    if (!field.trim()) return;
+    setStatus('submitting');
+    setErrorMsg(null);
+    const { error } = await supabase.from('data_correction_reports').insert({
+      player_id: playerId,
+      match_id: matchId,
+      field: field.trim(),
+      current_value: currentValue.trim() || null,
+      suggested_value: suggestedValue.trim() || null,
+      note: note.trim() || null,
+    });
+    if (error) {
+      setStatus('error');
+      setErrorMsg(error.message);
+    } else {
+      setStatus('submitted');
+    }
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between text-left">
+        <span className="flex items-center gap-1.5 text-xs font-semibold text-white">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400" /> Report Incorrect Data
+        </span>
+        {open ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+      </button>
+      {open && (
+        <div className="mt-3 pt-3 border-t border-gray-800 space-y-2">
+          {status === 'submitted' ? (
+            <p className="text-[11px] text-emerald-400 flex items-center gap-1.5"><Check className="w-3 h-3" /> Report submitted for review. Source data has not been changed.</p>
+          ) : (
+            <>
+              <div>
+                <label className="text-[10px] text-gray-500 uppercase">Field</label>
+                <input value={field} onChange={e => setField(e.target.value)} placeholder="e.g. CBA count, kick-in share, latest round"
+                  className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] text-gray-500 uppercase">Current value</label>
+                  <input value={currentValue} onChange={e => setCurrentValue(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+                </div>
+                <div>
+                  <label className="text-[10px] text-gray-500 uppercase">Suggested value</label>
+                  <input value={suggestedValue} onChange={e => setSuggestedValue(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+                </div>
+              </div>
+              <div>
+                <label className="text-[10px] text-gray-500 uppercase">Note</label>
+                <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+                  className="w-full bg-gray-800 border border-gray-700 text-white text-[11px] rounded px-2 py-1 mt-0.5" />
+              </div>
+              {status === 'error' && <p className="text-[10px] text-red-400">Failed to submit: {errorMsg}</p>}
+              <button
+                onClick={submit}
+                disabled={!field.trim() || status === 'submitting'}
+                className="w-full bg-amber-600 hover:bg-amber-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-[11px] font-medium rounded px-3 py-1.5 transition"
+              >
+                {status === 'submitting' ? 'Submitting…' : 'Submit Report'}
+              </button>
+              <p className="text-[9px] text-gray-600">This only logs a report for review — it never changes stored data automatically.</p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function PlayerIntelligenceDrawer({
@@ -212,6 +415,9 @@ export default function PlayerIntelligenceDrawer({
               )}
             </div>
           )}
+
+          <VerifyPlayerData playerId={intel.playerId} />
+          <ReportIncorrectData playerId={intel.playerId} matchId={intel.matchId} />
 
           {/* Genuine lines — add to slip */}
           <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-3">

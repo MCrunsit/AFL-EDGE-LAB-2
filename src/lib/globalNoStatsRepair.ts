@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import type { PlayerGameStat } from './types';
+import { fetchAllRows } from './supabasePagination';
 
 export interface MissingStatsEntry {
   playerName: string;
@@ -157,25 +158,24 @@ export async function repairGlobalNoStatsPlayerLinks(matchIds: string[]): Promis
     const allPlayerIds = [...new Set(allOdds.filter(r => r.player_id).map(r => r.player_id!))];
     result.playersChecked = allPlayerIds.length;
 
-    // Fetch stats counts per player_id (paginated — in('player_id', [...]) can exceed URL limits)
+    // Fetch stats counts per player_id, batched by player_id (in() can exceed
+    // URL limits) AND paginated per batch (200 players' full game history can
+    // itself exceed Supabase's 1000-row default, silently undercounting
+    // players who genuinely have stats and falsely flagging them for repair).
     const statsCountMap = new Map<string, number>();
     const STATS_BATCH = 200;
     for (let i = 0; i < allPlayerIds.length; i += STATS_BATCH) {
       const batch = allPlayerIds.slice(i, i + STATS_BATCH);
-      const { data: statsRows, error: statsErr } = await supabase
-        .from('player_game_stats')
-        .select('player_id')
-        .in('player_id', batch);
-
-      if (statsErr) {
+      let statsRows: { player_id: string }[];
+      try {
+        statsRows = await fetchAllRows(supabase, 'player_game_stats', 'player_id', (q) => q.in('player_id', batch));
+      } catch (e: any) {
         result.errors++;
-        result.errorMessages.push(`Stats fetch error: ${statsErr.message}`);
+        result.errorMessages.push(`Stats fetch error: ${e.message}`);
         continue;
       }
-      if (statsRows) {
-        for (const s of statsRows as Array<{ player_id: string }>) {
-          statsCountMap.set(s.player_id, (statsCountMap.get(s.player_id) ?? 0) + 1);
-        }
+      for (const s of statsRows) {
+        statsCountMap.set(s.player_id, (statsCountMap.get(s.player_id) ?? 0) + 1);
       }
     }
 
@@ -197,14 +197,13 @@ export async function repairGlobalNoStatsPlayerLinks(matchIds: string[]): Promis
 
     if (noStatsByPlayerKey.size === 0) return result;
 
-    // ── Step 5: Fetch all players for name matching ──
-    const { data: allPlayers, error: playersError } = await supabase
-      .from('players')
-      .select('id, name, team');
-
-    if (playersError || !allPlayers) {
+    // ── Step 5: Fetch all players for name matching (fully paginated) ──
+    let allPlayers: { id: string; name: string; team: string }[];
+    try {
+      allPlayers = await fetchAllRows(supabase, 'players', 'id, name, team');
+    } catch (e: any) {
       result.errors++;
-      result.errorMessages.push(`Players fetch error: ${playersError?.message ?? 'no data'}`);
+      result.errorMessages.push(`Players fetch error: ${e.message}`);
       return result;
     }
 

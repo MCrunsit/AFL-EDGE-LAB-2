@@ -3,6 +3,7 @@ import { Users, Search, Save, ChevronDown, RefreshCw, Upload, Download, AlertCir
 import { supabase } from '../lib/supabase';
 import { POSITION_GROUPS } from '../lib/types';
 import { autoAssignPositionGroups } from '../lib/positionEdge';
+import { fetchAllRows } from '../lib/supabasePagination';
 import LoadingSpinner from '../components/LoadingSpinner';
 
 interface Player {
@@ -64,23 +65,20 @@ export default function PositionGroupsPage() {
   }
 
   async function loadPlayers() {
-    const { data } = await supabase
-      .from('players')
-      .select('id, name, team, position, position_group')
-      .order('name');
-    setPlayers(data ?? []);
+    // Fully paginated — an unpaginated select here was silently capped at
+    // Supabase's 1000-row default out of ~2850 real players, making ~1850
+    // players invisible/uneditable in this management UI.
+    const data = await fetchAllRows<Player>(supabase, 'players', 'id, name, team, position, position_group');
+    data.sort((a, b) => a.name.localeCompare(b.name));
+    setPlayers(data);
   }
 
   async function loadCurrentRoundPlayerIds() {
-    const { data } = await supabase
-      .from('bookmaker_odds')
-      .select('player_id')
-      .not('player_id', 'is', null);
-
-    if (data) {
-      const ids = new Set(data.map(d => d.player_id).filter(Boolean) as string[]);
-      setCurrentRoundPlayerIds(ids);
-    }
+    const data = await fetchAllRows<{ player_id: string | null }>(
+      supabase, 'bookmaker_odds', 'player_id', (q) => q.not('player_id', 'is', null),
+    );
+    const ids = new Set(data.map(d => d.player_id).filter(Boolean) as string[]);
+    setCurrentRoundPlayerIds(ids);
   }
 
   const filtered = useMemo(() => {
