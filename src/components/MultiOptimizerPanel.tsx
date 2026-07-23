@@ -387,7 +387,7 @@ export default function MultiOptimizerPanel({
       // a balancedLine/valueLine (no strict safeLine) still gets an intelligence
       // entry, so Top 10/15/20/All Valid Players show real badges instead of
       // blank rows for anyone beyond the "Recommended" safeLine-only subset.
-      const row = rec.safeLine ?? rec.balancedLine ?? rec.valueLine;
+      const row = rec.bestOddsLine ?? rec.safeLine ?? rec.balancedLine ?? rec.valueLine;
       if (!row) continue;
       const playerId = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
       if (!playerId || map.has(playerId)) continue;
@@ -594,7 +594,7 @@ export default function MultiOptimizerPanel({
     try {
       // Exclude stale/uncertain players from automatic multis
       const freshRecommendations = gameRecommendationsFiltered.filter(rec => {
-        const sourceLine = settings.preset === 'sameGame' ? (rec.balancedLine ?? rec.safeLine) : rec.safeLine;
+        const sourceLine = settings.preset === 'sameGame' ? (rec.bestOddsLine ?? rec.balancedLine ?? rec.safeLine) : rec.safeLine;
         if (!sourceLine) return false;
         const fr = sourceLine.freshness;
         return fr && fr.freshnessStatus === 'CURRENT';
@@ -649,7 +649,7 @@ export default function MultiOptimizerPanel({
       return gameRecommendationsFiltered.filter(r => r.safeLine);
     }
     const withBestLine = gameRecommendationsFiltered
-      .map(r => ({ rec: r, line: r.safeLine ?? r.balancedLine ?? r.valueLine }))
+      .map(r => ({ rec: r, line: r.bestOddsLine ?? r.safeLine ?? r.balancedLine ?? r.valueLine }))
       .filter((x): x is { rec: typeof x.rec; line: NonNullable<typeof x.line> } =>
         x.line != null && x.line.over_odds <= MAX_RECOMMENDED_LEG_ODDS)
       .sort((a, b) => (b.line.adjustedProb ?? b.line.finalProbability ?? 0) - (a.line.adjustedProb ?? a.line.finalProbability ?? 0));
@@ -698,7 +698,7 @@ export default function MultiOptimizerPanel({
   const eligiblePlayerIds = useMemo(() => {
     const ids = new Set<string>();
     for (const r of gameRecommendationsFiltered) {
-      const line = r.safeLine ?? r.balancedLine ?? r.valueLine;
+      const line = r.bestOddsLine ?? r.safeLine ?? r.balancedLine ?? r.valueLine;
       if (!line) continue;
       const pid = line.player_id ?? line.resolvedPlayerId ?? '';
       if (pid) ids.add(pid);
