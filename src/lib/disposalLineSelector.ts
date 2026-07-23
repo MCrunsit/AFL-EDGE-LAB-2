@@ -8,6 +8,7 @@ export interface DisposalLineRecommendation {
   safeLine: ModelledOddsRow | null;
   balancedLine: ModelledOddsRow | null;
   valueLine: ModelledOddsRow | null;
+  bestOddsLine: ModelledOddsRow | null;
   seasonHitRate: number;
   last10HitRate: number;
   last5HitRate: number;
@@ -239,6 +240,36 @@ function selectBalancedLine(rows: ModelledOddsRow[], safeLine: ModelledOddsRow |
   return eligible[0];
 }
 
+/**
+ * Best genuine line at or under a price ceiling, searched across the
+ * player's FULL line set — not just the safeLine/balancedLine/valueLine
+ * tier picks, which can each land on a different rung and miss a cheaper
+ * genuine line the bookmaker actually offers (e.g. a player whose
+ * balancedLine sits above the ceiling even though a safe, cheaper rung
+ * exists). Picks the highest-confidence (adjustedProb) eligible line,
+ * tie-broken by the highest threshold for better value at that price.
+ */
+function selectBestOddsLine(rows: ModelledOddsRow[], maxOdds: number): ModelledOddsRow | null {
+  const eligible = rows.filter(r => {
+    if (r.modelStatus !== 'MODEL_READY') return false;
+    if (r.modelProb.sample_size < 10) return false;
+    if (r.over_odds > maxOdds || r.over_odds < 1.01) return false;
+    if (isExtremeLine(r)) return false;
+    if (r.modelProb.risk_level === 'High') return false;
+    if (hasStrongSuppression(r)) return false;
+    return true;
+  });
+  if (eligible.length === 0) return null;
+
+  eligible.sort((a, b) => {
+    const probA = a.modelProb.adjustedProb ?? a.modelProb.hit_rate;
+    const probB = b.modelProb.adjustedProb ?? b.modelProb.hit_rate;
+    if (probB !== probA) return probB - probA;
+    return b.line - a.line;
+  });
+  return eligible[0];
+}
+
 function selectValueLine(rows: ModelledOddsRow[]): ModelledOddsRow | null {
   const eligible = rows.filter(r => {
     if (r.modelStatus !== 'MODEL_READY') return false;
@@ -278,6 +309,7 @@ export function buildDisposalLineRecommendations(
     const safeLine = selectSafeLine(rows, criteria);
     const balancedLine = selectBalancedLine(rows, safeLine);
     const valueLine = selectValueLine(rows);
+    const bestOddsLine = selectBestOddsLine(rows, criteria.maxOdds);
 
     const rejectionReasons: string[] = [];
     if (!safeLine) {
@@ -309,6 +341,7 @@ export function buildDisposalLineRecommendations(
       safeLine,
       balancedLine,
       valueLine,
+      bestOddsLine,
       seasonHitRate,
       last10HitRate,
       last5HitRate,

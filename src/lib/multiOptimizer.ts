@@ -631,7 +631,7 @@ export async function runMultiOptimizerAsync(
 
   const poolLegs: OptimizerLeg[] = [];
   for (const rec of recommendations) {
-    const sourceLine = settings.preset === 'sameGame' ? (rec.balancedLine ?? rec.safeLine) : rec.safeLine;
+    const sourceLine = settings.preset === 'sameGame' ? (rec.bestOddsLine ?? rec.balancedLine ?? rec.safeLine) : rec.safeLine;
     if (sourceLine) {
       const matchName = matchNames[rec.matchId] ?? rec.matchId;
       poolLegs.push(rowToLeg(sourceLine, matchName, teamEnv, roleTrends));
