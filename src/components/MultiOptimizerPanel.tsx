@@ -630,7 +630,9 @@ export default function MultiOptimizerPanel({
   // options and "All" draw from every player with ANY valid line, ranked by
   // best-available adjusted probability. Build Your Own Multi is never
   // restricted by this — it already reads the full eligiblePlayerIds set.
-  const [candidatePoolSize, setCandidatePoolSize] = useState<'recommended' | 10 | 15 | 20 | 'all'>('recommended');
+  // Default to "All Valid Players" — the model may still rank/recommend, but
+  // it must not silently hide valid players with genuine bookmaker odds.
+  const [candidatePoolSize, setCandidatePoolSize] = useState<'recommended' | 10 | 15 | 20 | 'all'>('all');
 
   const candidateLegs = useMemo(() => {
     if (candidatePoolSize === 'recommended') {
