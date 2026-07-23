@@ -161,14 +161,28 @@ export async function loadTeamDisposalStats(season = 2026): Promise<{ stats: Tea
 
   const matchIds = matches.map(m => m.id);
 
-  const { data: stats } = await supabase
-    .from('player_game_stats')
-    .select('player_id, match_id, team, opponent, venue, disposals, match_date, round')
-    .in('match_id', matchIds)
-    .not('disposals', 'is', null)
-    .order('match_date', { ascending: true });
+  // Supabase/PostgREST silently caps an unpaginated select at 1000 rows. This
+  // season alone has several thousand player_game_stats rows, so a single
+  // request here was truncating to the earliest ~20 matches (ordered by
+  // match_date) and starving every team's "complete games" count — the root
+  // cause of Team Environment reading INSUFFICIENT_DATA almost everywhere.
+  const stats: { player_id: string; match_id: string | null; team: string; opponent: string | null; venue: string | null; disposals: number | null; match_date: string; round: string | null }[] = [];
+  const PAGE_SIZE = 1000;
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data: page, error } = await supabase
+      .from('player_game_stats')
+      .select('player_id, match_id, team, opponent, venue, disposals, match_date, round')
+      .in('match_id', matchIds)
+      .not('disposals', 'is', null)
+      .order('match_date', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) throw new Error(`Failed to load player_game_stats: ${error.message}`);
+    if (!page || page.length === 0) break;
+    stats.push(...page);
+    if (page.length < PAGE_SIZE) break;
+  }
 
-  if (!stats || stats.length === 0) return { stats: [], diagnostics: emptyDiagnostics() };
+  if (stats.length === 0) return { stats: [], diagnostics: emptyDiagnostics() };
 
   // Build per-match aggregation
   const matchAggregation = new Map<string, MatchAggregation>();
@@ -443,130 +457,4 @@ export async function buildTeamEnvironmentMap(
   return { map, stats, matchups };
 }
 
-export interface TeamAdvancedStats {
-  team: string;
-  seasonGames: number;
-  avgCP: number;
-  avgUP: number;
-  avgMetresGained: number;
-  avgIntercepts: number;
-  avgTOGPct: number;
-  avgEffectiveDisposals: number;
-  avgDisposalEffPct: number;
-  // Opponent conceded averages
-  avgCPConceded: number;
-  avgUPConceded: number;
-  avgMetresGainedConceded: number;
-}
-
-export async function loadTeamAdvancedStats(season = 2026): Promise<TeamAdvancedStats[]> {
-  const { data: matches } = await supabase
-    .from('matches')
-    .select('id, round, home_team, away_team, match_date')
-    .eq('season', season)
-    .neq('round', '0')
-    .order('match_date', { ascending: true });
-
-  if (!matches || matches.length === 0) return [];
-
-  const today = new Date().toISOString().split('T')[0];
-  const completedMatchIds = matches
-    .filter(m => m.match_date != null && m.match_date <= today)
-    .map(m => m.id);
-
-  if (completedMatchIds.length === 0) return [];
-
-  const { data: rows } = await supabase
-    .from('player_game_stats')
-    .select('player_id, match_id, team, opponent, contested_possessions, uncontested_possessions, metres_gained, intercepts, time_on_ground_pct, effective_disposals, disposal_efficiency_pct')
-    .in('match_id', completedMatchIds)
-    .not('contested_possessions', 'is', null);
-
-  if (!rows || rows.length === 0) return [];
-
-  // Build match lookup for home/away context
-  const matchMap = new Map(matches.map(m => [m.id, m]));
-
-  // Aggregate per team per match, then average across matches
-  interface MatchTeamSum {
-    cp: number; up: number; mg: number; int: number; tog: number; ed: number; dep: number; players: number;
-  }
-  const teamMatchData = new Map<string, Map<string, MatchTeamSum>>();
-
-  const seen = new Set<string>();
-  for (const r of rows) {
-    if (!r.match_id || !r.team) continue;
-    const key = `${r.player_id}-${r.match_id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    const canonTeam = normalizeTeam(r.team) ?? r.team;
-    if (!teamMatchData.has(canonTeam)) teamMatchData.set(canonTeam, new Map());
-    const matchMap2 = teamMatchData.get(canonTeam)!;
-    if (!matchMap2.has(r.match_id)) matchMap2.set(r.match_id, { cp: 0, up: 0, mg: 0, int: 0, tog: 0, ed: 0, dep: 0, players: 0 });
-    const s = matchMap2.get(r.match_id)!;
-    s.cp += r.contested_possessions ?? 0;
-    s.up += r.uncontested_possessions ?? 0;
-    s.mg += r.metres_gained ?? 0;
-    s.int += r.intercepts ?? 0;
-    s.tog += r.time_on_ground_pct ?? 0;
-    s.ed += r.effective_disposals ?? 0;
-    s.dep += r.disposal_efficiency_pct ?? 0;
-    s.players++;
-  }
-
-  // Build opponent conceded map: for each match, map opponent -> team's totals
-  // (opponent conceded = what they gave up to this team)
-  const concededData = new Map<string, { cp: number[]; up: number[]; mg: number[] }>();
-
-  for (const [team, matchData] of teamMatchData) {
-    for (const [mId, sums] of matchData) {
-      const m = matchMap.get(mId);
-      if (!m) continue;
-      const opp = normalizeTeam(team === normalizeTeam(m.home_team) ? m.away_team : m.home_team) ?? '';
-      if (!opp) continue;
-      if (!concededData.has(opp)) concededData.set(opp, { cp: [], up: [], mg: [] });
-      if (sums.players >= 10) {
-        concededData.get(opp)!.cp.push(sums.cp);
-        concededData.get(opp)!.up.push(sums.up);
-        concededData.get(opp)!.mg.push(sums.mg);
-      }
-    }
-  }
-
-  const avg = (arr: number[]) => arr.length > 0 ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
-
-  const result: TeamAdvancedStats[] = [];
-  for (const team of CANONICAL_TEAMS) {
-    const matchData = teamMatchData.get(team);
-    if (!matchData || matchData.size === 0) continue;
-
-    const validMatches = [...matchData.values()].filter(s => s.players >= 10);
-    if (validMatches.length === 0) continue;
-
-    const conceded = concededData.get(team) ?? { cp: [], up: [], mg: [] };
-
-    result.push({
-      team,
-      seasonGames: validMatches.length,
-      avgCP: avg(validMatches.map(s => s.cp)),
-      avgUP: avg(validMatches.map(s => s.up)),
-      avgMetresGained: avg(validMatches.map(s => s.mg)),
-      avgIntercepts: avg(validMatches.map(s => s.int)),
-      avgTOGPct: validMatches.length > 0
-        ? Math.round(validMatches.reduce((a, s) => a + (s.players > 0 ? s.tog / s.players : 0), 0) / validMatches.length)
-        : 0,
-      avgEffectiveDisposals: avg(validMatches.map(s => s.ed)),
-      avgDisposalEffPct: validMatches.length > 0
-        ? Math.round(validMatches.reduce((a, s) => a + (s.players > 0 ? s.dep / s.players : 0), 0) / validMatches.length)
-        : 0,
-      avgCPConceded: avg(conceded.cp),
-      avgUPConceded: avg(conceded.up),
-      avgMetresGainedConceded: avg(conceded.mg),
-    });
-  }
-
-  return result.sort((a, b) => b.avgCP - a.avgCP);
-}
-
-
+export { CURRENT_MODE };

@@ -26,6 +26,8 @@ import {
   type NoStatsFixResult,
 } from '../lib/missingStatsRepair';
 import { buildTeamEnvironmentMap, type TeamEnvironmentMap, type TeamMatchupEnvironment, type TeamDisposalStats } from '../lib/teamStatsService';
+import { buildTeamMatchRecords, buildTeamFullStats, type TeamFullStats } from '../lib/teamMatchAggregation';
+import { buildPlayerPossessionProfiles, type PlayerPossessionProfile, type PositionGroupPossessionAverage } from '../lib/playerPossessionProfile';
 import { loadRoleTrends, type RoleTrendMap } from '../lib/roleTrendService';
 import { getRoundStatsCompleteness, type RoundCompletenessResult } from '../lib/roundCompleteness';
 
@@ -114,6 +116,9 @@ export default function MultiBuilderPage() {
   const [teamEnvMap, setTeamEnvMap] = useState<TeamEnvironmentMap | undefined>(undefined);
   const [teamMatchups, setTeamMatchups] = useState<TeamMatchupEnvironment[]>([]);
   const [teamStats, setTeamStats] = useState<TeamDisposalStats[]>([]);
+  const [possessionProfiles, setPossessionProfiles] = useState<Map<string, PlayerPossessionProfile> | undefined>(undefined);
+  const [positionPossessionAverages, setPositionPossessionAverages] = useState<Map<string, PositionGroupPossessionAverage> | undefined>(undefined);
+  const [teamFullStatsMap, setTeamFullStatsMap] = useState<Map<string, TeamFullStats> | undefined>(undefined);
   const [roleTrends, setRoleTrends] = useState<RoleTrendMap | undefined>(undefined);
   const [roundCompleteness, setRoundCompleteness] = useState<RoundCompletenessResult | null>(null);
   const [modelRefreshedAt, setModelRefreshedAt] = useState<Date | null>(null);
@@ -354,6 +359,14 @@ export default function MultiBuilderPage() {
       setTeamStats(stats);
     }).catch(e => console.error('Team environment load error:', e));
     loadRoleTrends(2026).then(setRoleTrends).catch(e => console.error('Role trends load error:', e));
+    buildTeamMatchRecords(2026).then(({ records }) => {
+      const full = buildTeamFullStats(records);
+      setTeamFullStatsMap(new Map(full.map(t => [t.team, t])));
+    }).catch(e => console.error('Team possession stats load error:', e));
+    buildPlayerPossessionProfiles(2026).then(({ profiles, positionAverages }) => {
+      setPossessionProfiles(profiles);
+      setPositionPossessionAverages(positionAverages);
+    }).catch(e => console.error('Player possession profile load error:', e));
     if (slateInfo?.statsRound) {
       getRoundStatsCompleteness(2026, slateInfo.statsRound).then(setRoundCompleteness).catch(e => console.error('Round completeness error:', e));
     }
@@ -1449,6 +1462,9 @@ export default function MultiBuilderPage() {
           teamMatchups={teamMatchups}
           teamStats={teamStats}
           roleTrends={roleTrends}
+          possessionProfiles={possessionProfiles}
+          positionPossessionAverages={positionPossessionAverages}
+          teamFullStats={teamFullStatsMap}
           onResultsChange={handlePanelResultsChange}
         />
       )}

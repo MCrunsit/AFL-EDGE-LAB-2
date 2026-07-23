@@ -1,7 +1,5 @@
 import { X, Check, AlertTriangle, TrendingUp, Info } from 'lucide-react';
-import { useState, useEffect } from 'react';
 import type { PlayerIntelligence } from '../lib/playerIntelligenceService';
-import { loadPossessionProfile } from '../lib/playerIntelligenceService';
 import type { PullEmLeg } from '../lib/pullEmMultiOptimizer';
 
 interface Props {
@@ -30,14 +28,6 @@ function unavailable(text = 'Insufficient data') {
 export default function PlayerIntelligenceDrawer({
   intel, lines, matchName, selectedKeys, legKeyFn, onToggleLeg, conflictMsg, onClose,
 }: Props) {
-  const [possProfile, setPossProfile] = useState<PlayerIntelligence['possessionProfile'] | null>(null);
-
-  useEffect(() => {
-    if (!intel?.playerId) return;
-    setPossProfile(null);
-    loadPossessionProfile(intel.playerId).then(setPossProfile);
-  }, [intel?.playerId]);
-
   if (!intel) return null;
   const sample = lines[0]?.row;
   const fr = sample?.freshness;
@@ -117,6 +107,38 @@ export default function PlayerIntelligenceDrawer({
               <span className="text-[10px] text-gray-500">{intel.teamEnvironment.label.replace(/_/g, ' ')}</span>
             </div>
             <p className="text-[11px] text-gray-400">{intel.teamEnvironment.reason}</p>
+          </div>
+
+          {/* Possession-style matchup intelligence — uncontested / contested */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-semibold text-white">Uncontested Matchup</p>
+                <span className="text-[10px] text-gray-500">{intel.possessionEnvironment.uncontested.label.replace(/_/g, ' ')}</span>
+              </div>
+              <p className="text-[11px] text-gray-400 mb-1">{intel.possessionEnvironment.uncontested.reason}</p>
+              <div className="text-[10px] text-gray-500 space-y-0.5">
+                <p>Player UP rate: {intel.possessionEnvironment.uncontested.playerRate != null ? `${intel.possessionEnvironment.uncontested.playerRate}%` : 'Unknown'}</p>
+                <p>Position UP rate: {intel.possessionEnvironment.uncontested.positionRate != null ? `${intel.possessionEnvironment.uncontested.positionRate}%` : 'Unknown'}</p>
+                <p>Team UP index: {intel.possessionEnvironment.uncontested.teamForIndex ?? 'Unknown'}</p>
+                <p>Opp UP allowed index: {intel.possessionEnvironment.uncontested.opponentAllowedIndex ?? 'Unknown'}</p>
+                <p>Sample: {intel.possessionEnvironment.uncontested.playerSampleGames} games</p>
+              </div>
+            </div>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-semibold text-white">Contested Matchup</p>
+                <span className="text-[10px] text-gray-500">{intel.possessionEnvironment.contested.label.replace(/_/g, ' ')}</span>
+              </div>
+              <p className="text-[11px] text-gray-400 mb-1">{intel.possessionEnvironment.contested.reason}</p>
+              <div className="text-[10px] text-gray-500 space-y-0.5">
+                <p>Player CP rate: {intel.possessionEnvironment.contested.playerRate != null ? `${intel.possessionEnvironment.contested.playerRate}%` : 'Unknown'}</p>
+                <p>Position CP rate: {intel.possessionEnvironment.contested.positionRate != null ? `${intel.possessionEnvironment.contested.positionRate}%` : 'Unknown'}</p>
+                <p>Team CP index: {intel.possessionEnvironment.contested.teamForIndex ?? 'Unknown'}</p>
+                <p>Opp CP allowed index: {intel.possessionEnvironment.contested.opponentAllowedIndex ?? 'Unknown'}</p>
+                <p>Sample: {intel.possessionEnvironment.contested.playerSampleGames} games</p>
+              </div>
+            </div>
           </div>
 
           {/* Role Intelligence */}
@@ -224,56 +246,6 @@ export default function PlayerIntelligenceDrawer({
               )}
             </div>
           </div>
-
-          {/* Possession Profile */}
-          {possProfile && (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-xs font-semibold text-white">Possession Profile</p>
-                {possProfile.available && (
-                  <span className="text-[10px] text-gray-500">{possProfile.reason}</span>
-                )}
-              </div>
-              {!possProfile.available ? (
-                <p className="text-[11px] text-gray-500">{possProfile.reason}</p>
-              ) : (
-                <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">Avg Contested</span>
-                    <span className="text-cyan-400 font-semibold">{possProfile.avgCP ?? '—'}</span>
-                  </div>
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">Avg Uncontested</span>
-                    <span className="text-amber-400 font-semibold">{possProfile.avgUP ?? '—'}</span>
-                  </div>
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">Total Poss (CP+UP)</span>
-                    <span className="text-white font-semibold">{possProfile.avgTotalPossessions ?? '—'}</span>
-                  </div>
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">Avg Disposals</span>
-                    <span className="text-white">{possProfile.avgDisposals ?? '—'}</span>
-                  </div>
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">Metres Gained</span>
-                    <span className="text-white">{possProfile.avgMetresGained ?? '—'}</span>
-                  </div>
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">Intercepts</span>
-                    <span className="text-white">{possProfile.avgIntercepts ?? '—'}</span>
-                  </div>
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">TOG%</span>
-                    <span className="text-white">{possProfile.avgTOGPct != null ? `${possProfile.avgTOGPct}%` : '—'}</span>
-                  </div>
-                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
-                    <span className="text-gray-500 block">Disposal Eff%</span>
-                    <span className="text-white">{possProfile.avgDisposalEffPct != null ? `${possProfile.avgDisposalEffPct}%` : '—'}</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </div>

@@ -26,6 +26,7 @@ const TEAM_MAP: Record<string, string> = {
   'suns': 'Gold Coast',
   'gold-coast': 'Gold Coast',
   'gws': 'GWS',
+  'gws giants': 'GWS',
   'greater western sydney': 'GWS',
   'greater western sydney giants': 'GWS',
   'giants': 'GWS',
