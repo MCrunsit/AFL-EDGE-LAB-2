@@ -25,14 +25,30 @@ export interface RoleTrendEntry {
   team: string;
   sampleSize: number;
   latestRound: string | null;
+  /** @deprecated ambiguous name — kept for existing trend-calc consumers, but
+   * this is actually cba_percentage (a 0-1 share), not a count. Use
+   * latestCbaCount for the real attendance count. */
   latestCba: number | null;
+  latestCbaCount: number | null;
   latestKickInCount: number | null;
   latestKickInShare: number | null;
   latestUpdatedAt: string | null;
+  /** @deprecated ambiguous name — these are cba_percentage averages (0-1
+   * shares), not attendance-count averages. Use cbaCountSeasonAvg etc. */
   cbaSeasonAvg: number;
   cbaLast10: number;
   cbaLast5: number;
   cbaLast3: number;
+  /** Genuine CBA attendance-count averages (raw counts, not shares). */
+  cbaCountSeasonAvg: number;
+  cbaCountLast10: number;
+  cbaCountLast5: number;
+  cbaCountLast3: number;
+  /** Genuine kick-in count averages (raw counts, not shares). */
+  kickInCountSeasonAvg: number;
+  kickInCountLast10: number;
+  kickInCountLast5: number;
+  kickInCountLast3: number;
   kickInSeasonShare: number;
   kickInLast10Share: number;
   kickInLast5Share: number;
@@ -106,24 +122,44 @@ function getTrendDisplay(label: RoleTrendLabel): string {
  * If the table doesn't exist or has no data, returns an empty map.
  */
 export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
-  const { data, error } = await supabase
-    .from('player_role_data')
-    .select(`
-      player_id,
-      match_id,
-      round,
-      cba_percentage,
-      cba_count,
-      team_cba_total,
-      kick_in_count,
-      kick_in_play_on_count,
-      kick_in_share,
-      source,
-      updated_at
-    `)
-    .order('updated_at', { ascending: false });
+  // Fully paginated — an unpaginated select here was silently capped at
+  // Supabase's 1000-row default (out of 7000+ role rows for a full season),
+  // and since it was ordered by updated_at desc, only whichever 1000 rows
+  // happened to be most recently touched survived. Every other player's
+  // rows were silently dropped, producing tiny sample sizes and stale
+  // "latest round" values across most of the season's coverage.
+  const data: any[] = [];
+  {
+    const pageSize = 1000;
+    let offset = 0;
+    for (;;) {
+      const { data: page, error } = await supabase
+        .from('player_role_data')
+        .select(`
+          player_id,
+          match_id,
+          round,
+          cba_percentage,
+          cba_count,
+          team_cba_total,
+          kick_in_count,
+          kick_in_play_on_count,
+          kick_in_share,
+          source,
+          updated_at
+        `)
+        .eq('season', season)
+        .order('id')
+        .range(offset, offset + pageSize - 1);
+      if (error) { console.error('loadRoleTrends pagination error:', error); break; }
+      if (!page || page.length === 0) break;
+      data.push(...page);
+      if (page.length < pageSize) break;
+      offset += pageSize;
+    }
+  }
 
-  if (error || !data || data.length === 0) {
+  if (data.length === 0) {
     return new Map();
   }
 
@@ -162,7 +198,21 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
 
   const result: RoleTrendMap = new Map();
   for (const [playerId, records] of byPlayer) {
-    const sorted = records.sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+    // Sort by round chronologically, NOT updated_at (row insert/update time).
+    // Sorting by updated_at was the root cause of "latest round shows Round 1":
+    // if an early-round row got re-touched during a later backfill/repair run,
+    // its updated_at became more recent than genuinely later rounds' rows,
+    // making it look like the "latest" match even though it wasn't. This table
+    // has no match_date column, so round (always a clean numeric string here,
+    // confirmed against live data) is the correct chronological sort key.
+    const sorted = [...records].sort((a, b) => {
+      const ra = parseInt(a.round, 10);
+      const rb = parseInt(b.round, 10);
+      if (!Number.isNaN(ra) && !Number.isNaN(rb) && ra !== rb) return rb - ra;
+      if (!Number.isNaN(ra) && Number.isNaN(rb)) return -1;
+      if (Number.isNaN(ra) && !Number.isNaN(rb)) return 1;
+      return (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '');
+    });
     const seasonRecords = sorted;
     const last10 = sorted.slice(0, 10);
     const last5 = sorted.slice(0, 5);
@@ -172,6 +222,16 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
     const cbaLast10 = avg(last10, r => r.cbaPercentage);
     const cbaLast5 = avg(last5, r => r.cbaPercentage);
     const cbaLast3 = avg(last3, r => r.cbaPercentage);
+
+    const cbaCountSeasonAvg = avg(seasonRecords, r => r.cbaCount);
+    const cbaCountLast10 = avg(last10, r => r.cbaCount);
+    const cbaCountLast5 = avg(last5, r => r.cbaCount);
+    const cbaCountLast3 = avg(last3, r => r.cbaCount);
+
+    const kickInCountSeasonAvg = avg(seasonRecords, r => r.kickInCount);
+    const kickInCountLast10 = avg(last10, r => r.kickInCount);
+    const kickInCountLast5 = avg(last5, r => r.kickInCount);
+    const kickInCountLast3 = avg(last3, r => r.kickInCount);
 
     const kickInSeasonShare = avg(seasonRecords, r => r.kickInShare);
     const kickInLast10Share = avg(last10, r => r.kickInShare);
@@ -195,6 +255,7 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
       sampleSize: seasonRecords.length,
       latestRound: first ? (first.round || null) : null,
       latestCba: first ? first.cbaPercentage : null,
+      latestCbaCount: first ? first.cbaCount : null,
       latestKickInCount: first ? first.kickInCount : null,
       latestKickInShare: first ? first.kickInShare : null,
       latestUpdatedAt: first ? (first.updatedAt || null) : null,
@@ -202,6 +263,14 @@ export async function loadRoleTrends(season = 2026): Promise<RoleTrendMap> {
       cbaLast10,
       cbaLast5,
       cbaLast3,
+      cbaCountSeasonAvg,
+      cbaCountLast10,
+      cbaCountLast5,
+      cbaCountLast3,
+      kickInCountSeasonAvg,
+      kickInCountLast10,
+      kickInCountLast5,
+      kickInCountLast3,
       kickInSeasonShare,
       kickInLast10Share,
       kickInLast5Share,

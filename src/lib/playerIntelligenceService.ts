@@ -72,11 +72,14 @@ export interface PlayerIntelligence {
 
   cba: {
     available: boolean;
+    /** Genuine centre-bounce attendance COUNT averages (e.g. 15.4 attendances/game). */
     seasonAverage: number | null;
     last10Average: number | null;
     last5Average: number | null;
     last3Average: number | null;
     latestValue: number | null;
+    /** Share of the TEAM's centre bounces this player attended, as a 0-100 percentage. Display with %. */
+    teamSharePercentage: number | null;
     latestRound: string | null;
     sampleSize: number;
     trend: TrendLabelType;
@@ -85,12 +88,16 @@ export interface PlayerIntelligence {
 
   kickIns: {
     available: boolean;
+    /** Genuine kick-in COUNT averages (e.g. 3.8 kick-ins/game). */
     seasonAverage: number | null;
     last10Average: number | null;
     last5Average: number | null;
     last3Average: number | null;
     latestValue: number | null;
+    /** Share of the TEAM's kick-ins this player took, as a 0-100 percentage. Display with %. */
+    teamSharePercentage: number | null;
     latestRound: string | null;
+    /** Percentage of this player's kick-ins played on from, 0-100. Display with %. */
     playOnPercentage: number | null;
     sampleSize: number;
     trend: TrendLabelType;
@@ -331,18 +338,21 @@ function computeCbaIntel(entry: RoleTrendEntry | undefined): PlayerIntelligence[
   if (!entry || entry.sampleSize === 0) {
     return {
       available: false, seasonAverage: null, last10Average: null, last5Average: null, last3Average: null,
-      latestValue: null, latestRound: null, sampleSize: 0,
+      latestValue: null, teamSharePercentage: null, latestRound: null, sampleSize: 0,
       trend: 'INSUFFICIENT_DATA', reason: 'No genuine centre-bounce attendance data has been imported for this player yet.',
     };
   }
   const trend = trendLabelFromChange(entry.cbaChange, 10, entry.sampleSize);
   return {
     available: true,
-    seasonAverage: entry.cbaSeasonAvg,
-    last10Average: entry.cbaLast10,
-    last5Average: entry.cbaLast5,
-    last3Average: entry.cbaLast3,
-    latestValue: entry.latestCba,
+    // Counts (raw attendances), not the team-share percentage.
+    seasonAverage: Math.round(entry.cbaCountSeasonAvg * 10) / 10,
+    last10Average: Math.round(entry.cbaCountLast10 * 10) / 10,
+    last5Average: Math.round(entry.cbaCountLast5 * 10) / 10,
+    last3Average: Math.round(entry.cbaCountLast3 * 10) / 10,
+    latestValue: entry.latestCbaCount,
+    // cba_percentage is stored 0-1 in the DB — convert to 0-100 here, once, at the source.
+    teamSharePercentage: entry.latestCba != null ? Math.round(entry.latestCba * 1000) / 10 : null,
     latestRound: entry.latestRound,
     sampleSize: entry.sampleSize,
     trend,
@@ -354,23 +364,26 @@ function computeKickInIntel(entry: RoleTrendEntry | undefined): PlayerIntelligen
   if (!entry || entry.sampleSize === 0) {
     return {
       available: false, seasonAverage: null, last10Average: null, last5Average: null, last3Average: null,
-      latestValue: null, latestRound: null, playOnPercentage: null, sampleSize: 0,
+      latestValue: null, teamSharePercentage: null, latestRound: null, playOnPercentage: null, sampleSize: 0,
       trend: 'INSUFFICIENT_DATA', reason: 'No genuine kick-in data has been imported for this player yet.',
     };
   }
   const trend = trendLabelFromChange(entry.kickInChange, 0.08, entry.sampleSize);
   return {
     available: true,
-    seasonAverage: entry.kickInSeasonShare,
-    last10Average: entry.kickInLast10Share,
-    last5Average: entry.kickInLast5Share,
-    last3Average: entry.kickInLast3Share,
-    latestValue: entry.latestKickInShare,
+    // Counts (raw kick-ins), not the team-share percentage.
+    seasonAverage: Math.round(entry.kickInCountSeasonAvg * 10) / 10,
+    last10Average: Math.round(entry.kickInCountLast10 * 10) / 10,
+    last5Average: Math.round(entry.kickInCountLast5 * 10) / 10,
+    last3Average: Math.round(entry.kickInCountLast3 * 10) / 10,
+    latestValue: entry.latestKickInCount,
+    // kick_in_share is stored 0-1 in the DB — convert to 0-100 here, once, at the source.
+    teamSharePercentage: entry.latestKickInShare != null ? Math.round(entry.latestKickInShare * 1000) / 10 : null,
     latestRound: entry.latestRound,
-    playOnPercentage: entry.kickInPlayOnPctSeason,
+    playOnPercentage: entry.kickInPlayOnPctSeason != null ? Math.round(entry.kickInPlayOnPctSeason * 1000) / 10 : null,
     sampleSize: entry.sampleSize,
     trend,
-    reason: `Genuine kick-in share data from ${entry.sampleSize} matches (source: DFS Australia via player_role_data).`,
+    reason: `Genuine kick-in data from ${entry.sampleSize} matches (source: DFS Australia via player_role_data).`,
   };
 }
 

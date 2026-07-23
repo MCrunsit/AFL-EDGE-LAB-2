@@ -151,18 +151,23 @@ export default function PlayerIntelligenceDrawer({
             <p className="text-[11px] text-gray-400">{intel.roleIntelligence.reason}</p>
           </div>
 
-          {/* CBA / Kick-ins */}
+          {/* CBA / Kick-ins — counts and percentages are always kept distinct:
+              seasonAverage/last*Average/latestValue are raw counts (already
+              stored as counts, never re-scaled); teamSharePercentage and
+              playOnPercentage are 0-100 percentages (converted once, at the
+              service layer from the 0-1 DB values) and always rendered with %. */}
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
               <p className="text-xs font-semibold text-white mb-1">CBA Evidence</p>
               {intel.cba.available ? (
                 <div className="text-[10px] text-gray-400 space-y-0.5">
-                  <p>Season: {fmtNum(intel.cba.seasonAverage)}</p>
-                  <p>Last 10: {fmtNum(intel.cba.last10Average)}</p>
-                  <p>Last 5: {fmtNum(intel.cba.last5Average)}</p>
-                  <p>Last 3: {fmtNum(intel.cba.last3Average)}</p>
-                  <p>Latest: {fmtNum(intel.cba.latestValue)}</p>
-                  <p>Latest round: {intel.cba.latestRound ? `Round ${intel.cba.latestRound}` : 'Unknown'}</p>
+                  <p>Latest: {intel.cba.latestValue ?? '—'} attendances</p>
+                  <p>Team share: {intel.cba.teamSharePercentage !== null ? `${intel.cba.teamSharePercentage}%` : 'Unknown'}</p>
+                  <p>Season average: {fmtNum(intel.cba.seasonAverage)}</p>
+                  <p>Last 10 average: {fmtNum(intel.cba.last10Average)}</p>
+                  <p>Last 5 average: {fmtNum(intel.cba.last5Average)}</p>
+                  <p>Last 3 average: {fmtNum(intel.cba.last3Average)}</p>
+                  <p>Latest data: {intel.cba.latestRound ? `Round ${intel.cba.latestRound}` : 'Unknown'}</p>
                   <p>Sample: {intel.cba.sampleSize} matches</p>
                   <p>Trend: {intel.cba.trend.replace(/_/g, ' ')}</p>
                 </div>
@@ -172,13 +177,14 @@ export default function PlayerIntelligenceDrawer({
               <p className="text-xs font-semibold text-white mb-1">Kick-In Evidence</p>
               {intel.kickIns.available ? (
                 <div className="text-[10px] text-gray-400 space-y-0.5">
-                  <p>Season: {fmtNum(intel.kickIns.seasonAverage, 2)}</p>
-                  <p>Last 10: {fmtNum(intel.kickIns.last10Average, 2)}</p>
-                  <p>Last 5: {fmtNum(intel.kickIns.last5Average, 2)}</p>
-                  <p>Last 3: {fmtNum(intel.kickIns.last3Average, 2)}</p>
-                  <p>Latest: {fmtNum(intel.kickIns.latestValue, 2)}</p>
-                  <p>Latest round: {intel.kickIns.latestRound ? `Round ${intel.kickIns.latestRound}` : 'Unknown'}</p>
-                  <p>Play-on %: {intel.kickIns.playOnPercentage !== null ? `${Math.round(intel.kickIns.playOnPercentage * 100)}%` : 'Insufficient data'}</p>
+                  <p>Latest: {intel.kickIns.latestValue ?? '—'}</p>
+                  <p>Team share: {intel.kickIns.teamSharePercentage !== null ? `${intel.kickIns.teamSharePercentage}%` : 'Unknown'}</p>
+                  <p>Played on: {intel.kickIns.playOnPercentage !== null ? `${intel.kickIns.playOnPercentage}%` : 'Insufficient data'}</p>
+                  <p>Season average: {fmtNum(intel.kickIns.seasonAverage)}</p>
+                  <p>Last 10 average: {fmtNum(intel.kickIns.last10Average)}</p>
+                  <p>Last 5 average: {fmtNum(intel.kickIns.last5Average)}</p>
+                  <p>Last 3 average: {fmtNum(intel.kickIns.last3Average)}</p>
+                  <p>Latest data: {intel.kickIns.latestRound ? `Round ${intel.kickIns.latestRound}` : 'Unknown'}</p>
                   <p>Sample: {intel.kickIns.sampleSize} matches</p>
                   <p>Trend: {intel.kickIns.trend.replace(/_/g, ' ')}</p>
                 </div>
