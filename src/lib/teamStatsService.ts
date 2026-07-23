@@ -161,14 +161,28 @@ export async function loadTeamDisposalStats(season = 2026): Promise<{ stats: Tea
 
   const matchIds = matches.map(m => m.id);
 
-  const { data: stats } = await supabase
-    .from('player_game_stats')
-    .select('player_id, match_id, team, opponent, venue, disposals, match_date, round')
-    .in('match_id', matchIds)
-    .not('disposals', 'is', null)
-    .order('match_date', { ascending: true });
+  // Supabase/PostgREST silently caps an unpaginated select at 1000 rows. This
+  // season alone has several thousand player_game_stats rows, so a single
+  // request here was truncating to the earliest ~20 matches (ordered by
+  // match_date) and starving every team's "complete games" count — the root
+  // cause of Team Environment reading INSUFFICIENT_DATA almost everywhere.
+  const stats: { player_id: string; match_id: string | null; team: string; opponent: string | null; venue: string | null; disposals: number | null; match_date: string; round: string | null }[] = [];
+  const PAGE_SIZE = 1000;
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data: page, error } = await supabase
+      .from('player_game_stats')
+      .select('player_id, match_id, team, opponent, venue, disposals, match_date, round')
+      .in('match_id', matchIds)
+      .not('disposals', 'is', null)
+      .order('match_date', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) throw new Error(`Failed to load player_game_stats: ${error.message}`);
+    if (!page || page.length === 0) break;
+    stats.push(...page);
+    if (page.length < PAGE_SIZE) break;
+  }
 
-  if (!stats || stats.length === 0) return { stats: [], diagnostics: emptyDiagnostics() };
+  if (stats.length === 0) return { stats: [], diagnostics: emptyDiagnostics() };
 
   // Build per-match aggregation
   const matchAggregation = new Map<string, MatchAggregation>();
