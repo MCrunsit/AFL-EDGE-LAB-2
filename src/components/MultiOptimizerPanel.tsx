@@ -17,6 +17,8 @@ import {
   type ExcludedPlayer,
 } from '../lib/playerExclusions';
 import type { PositionEdgeCache } from '../lib/positionEdge';
+import type { PlayerPossessionProfile, PositionGroupPossessionAverage } from '../lib/playerPossessionProfile';
+import type { TeamFullStats } from '../lib/teamMatchAggregation';
 import {
   computePlayerIntelligence, getSharedPositionEdgeCache, type PlayerIntelligence,
 } from '../lib/playerIntelligenceService';
@@ -57,6 +59,9 @@ interface Props {
   teamMatchups?: TeamMatchupEnvironment[];
   teamStats?: TeamDisposalStats[];
   roleTrends?: RoleTrendMap;
+  possessionProfiles?: Map<string, PlayerPossessionProfile>;
+  positionPossessionAverages?: Map<string, PositionGroupPossessionAverage>;
+  teamFullStats?: Map<string, TeamFullStats>;
   /** Reports this panel's live counts up so the page-level diagnostics can show real, reconciled totals instead of a separate stale pipeline. */
   onResultsChange?: (info: { poolSize: number; multiCount: number; customLegsAvailable: number }) => void;
 }
@@ -240,6 +245,7 @@ function IntelBadges({ intel, onClick }: { intel: PlayerIntelligence | undefined
 export default function MultiOptimizerPanel({
   recommendations, matchNames, matches, selectedMatchId, onSelectMatch,
   statsRoundLabel, lineSafety, onLineSafetyChange, teamEnvMap, teamMatchups, teamStats, roleTrends,
+  possessionProfiles, positionPossessionAverages, teamFullStats,
   onResultsChange,
 }: Props) {
   const [mode, setMode] = useState<'gameMulti' | 'roundMulti'>('gameMulti');
@@ -394,10 +400,13 @@ export default function MultiOptimizerPanel({
         teamEnvMap,
         teamStats,
         roleTrends,
+        possessionProfile: possessionProfiles?.get(playerId),
+        positionPossessionAverages,
+        teamFullStats,
       }));
     }
     return map;
-  }, [gameRecommendations, positionEdgeCache, teamEnvMap, teamStats, roleTrends]);
+  }, [gameRecommendations, positionEdgeCache, teamEnvMap, teamStats, roleTrends, possessionProfiles, positionPossessionAverages, teamFullStats]);
 
   // Intelligence filters applied on top of the shared eligible pool. Every
   // downstream consumer below (Best Individual Legs, Suggested Multis via

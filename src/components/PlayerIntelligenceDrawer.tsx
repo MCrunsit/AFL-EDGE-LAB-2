@@ -109,6 +109,38 @@ export default function PlayerIntelligenceDrawer({
             <p className="text-[11px] text-gray-400">{intel.teamEnvironment.reason}</p>
           </div>
 
+          {/* Possession-style matchup intelligence — uncontested / contested */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-semibold text-white">Uncontested Matchup</p>
+                <span className="text-[10px] text-gray-500">{intel.possessionEnvironment.uncontested.label.replace(/_/g, ' ')}</span>
+              </div>
+              <p className="text-[11px] text-gray-400 mb-1">{intel.possessionEnvironment.uncontested.reason}</p>
+              <div className="text-[10px] text-gray-500 space-y-0.5">
+                <p>Player UP rate: {intel.possessionEnvironment.uncontested.playerRate != null ? `${intel.possessionEnvironment.uncontested.playerRate}%` : 'Unknown'}</p>
+                <p>Position UP rate: {intel.possessionEnvironment.uncontested.positionRate != null ? `${intel.possessionEnvironment.uncontested.positionRate}%` : 'Unknown'}</p>
+                <p>Team UP index: {intel.possessionEnvironment.uncontested.teamForIndex ?? 'Unknown'}</p>
+                <p>Opp UP allowed index: {intel.possessionEnvironment.uncontested.opponentAllowedIndex ?? 'Unknown'}</p>
+                <p>Sample: {intel.possessionEnvironment.uncontested.playerSampleGames} games</p>
+              </div>
+            </div>
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-semibold text-white">Contested Matchup</p>
+                <span className="text-[10px] text-gray-500">{intel.possessionEnvironment.contested.label.replace(/_/g, ' ')}</span>
+              </div>
+              <p className="text-[11px] text-gray-400 mb-1">{intel.possessionEnvironment.contested.reason}</p>
+              <div className="text-[10px] text-gray-500 space-y-0.5">
+                <p>Player CP rate: {intel.possessionEnvironment.contested.playerRate != null ? `${intel.possessionEnvironment.contested.playerRate}%` : 'Unknown'}</p>
+                <p>Position CP rate: {intel.possessionEnvironment.contested.positionRate != null ? `${intel.possessionEnvironment.contested.positionRate}%` : 'Unknown'}</p>
+                <p>Team CP index: {intel.possessionEnvironment.contested.teamForIndex ?? 'Unknown'}</p>
+                <p>Opp CP allowed index: {intel.possessionEnvironment.contested.opponentAllowedIndex ?? 'Unknown'}</p>
+                <p>Sample: {intel.possessionEnvironment.contested.playerSampleGames} games</p>
+              </div>
+            </div>
+          </div>
+
           {/* Role Intelligence */}
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
             <div className="flex items-center justify-between mb-1">

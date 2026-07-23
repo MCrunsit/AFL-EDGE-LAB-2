@@ -19,6 +19,8 @@ import type { RoleTrendMap, RoleTrendEntry } from './roleTrendService';
 import type { PositionEdgeCache, PositionEdgeResult, ConfidenceLevel } from './positionEdge';
 import { getPositionEdge, normalizeOpponentName, loadPositionEdgeCache } from './positionEdge';
 import { normalizeTeam } from './teamNormalizer';
+import type { PlayerPossessionProfile, PositionGroupPossessionAverage } from './playerPossessionProfile';
+import type { TeamFullStats } from './teamMatchAggregation';
 
 export type PositionEdgeLabelType =
   | 'VERY_POSITIVE' | 'POSITIVE' | 'NEUTRAL' | 'NEGATIVE' | 'VERY_NEGATIVE' | 'INSUFFICIENT_DATA';
@@ -93,6 +95,30 @@ export interface PlayerIntelligence {
     sampleSize: number;
     trend: TrendLabelType;
     reason: string;
+  };
+
+  /** Possession-style matchup intelligence (Phase 12) — separate from the
+   * overall disposal teamEnvironment above. Insufficient CP/UP data reports
+   * as INSUFFICIENT_DATA, never as negative. */
+  possessionEnvironment: {
+    uncontested: {
+      label: TeamEnvironmentLabelType;
+      playerRate: number | null; // this player's UP / (CP+UP), %
+      positionRate: number | null; // position-group average UP rate, %
+      teamForIndex: number | null; // team's UP-for vs league avg, ~100
+      opponentAllowedIndex: number | null; // opponent's UP-allowed vs league avg, ~100
+      playerSampleGames: number;
+      reason: string;
+    };
+    contested: {
+      label: TeamEnvironmentLabelType;
+      playerRate: number | null;
+      positionRate: number | null;
+      teamForIndex: number | null;
+      opponentAllowedIndex: number | null;
+      playerSampleGames: number;
+      reason: string;
+    };
   };
 
   positives: string[];
@@ -402,16 +428,94 @@ export interface PlayerIntelligenceInput {
   teamEnvMap: TeamEnvironmentMap | undefined;
   teamStats: TeamDisposalStats[] | undefined;
   roleTrends: RoleTrendMap | undefined;
+  /** Optional — possession-style matchup intelligence (Phase 12). Absent
+   * gracefully degrades to INSUFFICIENT_DATA rather than erroring. */
+  possessionProfile?: PlayerPossessionProfile;
+  positionPossessionAverages?: Map<string, PositionGroupPossessionAverage>;
+  teamFullStats?: Map<string, TeamFullStats>;
+}
+
+function possessionSignal(
+  playerRate: number | null | undefined,
+  positionRate: number | null | undefined,
+  teamForIndex: number | null | undefined,
+  opponentAllowedIndex: number | null | undefined,
+  playerSampleGames: number,
+  styleName: 'uncontested' | 'contested',
+  playerName: string,
+  team: string,
+  opponentTeam: string | null,
+): PlayerIntelligence['possessionEnvironment']['uncontested'] {
+  const MIN_SAMPLE = 3;
+  if (playerRate == null || positionRate == null || playerSampleGames < MIN_SAMPLE) {
+    return {
+      label: 'INSUFFICIENT_DATA', playerRate: playerRate ?? null, positionRate: positionRate ?? null,
+      teamForIndex: teamForIndex ?? null, opponentAllowedIndex: opponentAllowedIndex ?? null,
+      playerSampleGames,
+      reason: `Not enough genuine ${styleName} possession data yet (${playerSampleGames} game${playerSampleGames === 1 ? '' : 's'} recorded, need ${MIN_SAMPLE}+).`,
+    };
+  }
+  const playerAbovePosition = playerRate - positionRate;
+  const teamStrong = teamForIndex != null && teamForIndex >= 105;
+  const oppAllowsMore = opponentAllowedIndex != null && opponentAllowedIndex >= 105;
+  const teamWeak = teamForIndex != null && teamForIndex <= 95;
+  const oppAllowsLess = opponentAllowedIndex != null && opponentAllowedIndex <= 95;
+
+  let label: TeamEnvironmentLabelType = 'NEUTRAL';
+  const positiveSignals = [playerAbovePosition > 3, teamStrong, oppAllowsMore].filter(Boolean).length;
+  const negativeSignals = [playerAbovePosition < -3, teamWeak, oppAllowsLess].filter(Boolean).length;
+  if (positiveSignals >= 2) label = 'HIGH';
+  else if (positiveSignals >= 1 && negativeSignals === 0) label = 'POSITIVE';
+  else if (negativeSignals >= 2) label = 'LOW';
+  else if (negativeSignals >= 1 && positiveSignals === 0) label = 'NEGATIVE';
+
+  const oppText = opponentTeam ? ` ${opponentAllowedIndex != null ? (opponentAllowedIndex >= 100 ? `${opponentTeam} allows ${opponentAllowedIndex - 100}% more ${styleName} possessions than the league average.` : `${opponentTeam} allows ${100 - opponentAllowedIndex}% fewer ${styleName} possessions than the league average.`) : ''}` : '';
+  const reason = `${playerName} records ${playerRate}% of possessions ${styleName}, ${playerAbovePosition >= 0 ? 'above' : 'below'} the position average of ${positionRate}%.${oppText}`;
+
+  return {
+    label, playerRate, positionRate, teamForIndex: teamForIndex ?? null, opponentAllowedIndex: opponentAllowedIndex ?? null,
+    playerSampleGames, reason,
+  };
+}
+
+function computePossessionEnvironmentIntel(
+  playerName: string, team: string, opponentTeam: string | null,
+  profile: PlayerPossessionProfile | undefined,
+  positionAverages: Map<string, PositionGroupPossessionAverage> | undefined,
+  teamFullStats: Map<string, TeamFullStats> | undefined,
+): PlayerIntelligence['possessionEnvironment'] {
+  const posAvg = profile ? positionAverages?.get(profile.positionGroup) : undefined;
+  // teamFullStats is keyed by canonical team name (e.g. "Collingwood"); the
+  // player row's team field can be a raw slug ("collingwood") — normalize
+  // before lookup, the same gap that caused Team Environment's earlier bug.
+  const teamStatsEntry = teamFullStats?.get(normalizeTeam(team) ?? team);
+  const oppStatsEntry = opponentTeam ? teamFullStats?.get(normalizeTeam(opponentTeam) ?? opponentTeam) : undefined;
+  const sample = profile?.season.games ?? 0;
+
+  return {
+    uncontested: possessionSignal(
+      profile?.season.upRate, posAvg?.upRate, teamStatsEntry?.uncontestedForIndex, oppStatsEntry?.uncontestedAllowedIndex,
+      sample, 'uncontested', playerName, team, opponentTeam,
+    ),
+    contested: possessionSignal(
+      profile?.season.cpRate, posAvg?.cpRate, teamStatsEntry?.contestedForIndex, oppStatsEntry?.contestedAllowedIndex,
+      sample, 'contested', playerName, team, opponentTeam,
+    ),
+  };
 }
 
 export function computePlayerIntelligence(input: PlayerIntelligenceInput): PlayerIntelligence {
   const {
     row, playerId, playerName, team, matchId, opponentTeam, positionGroup,
     statType = 'disposals', positionEdgeCache, teamEnvMap, teamStats, roleTrends,
+    possessionProfile, positionPossessionAverages, teamFullStats,
   } = input;
 
   const positionEdge = computePositionEdgeIntel(positionEdgeCache, positionGroup, opponentTeam, statType);
   const teamEnvironment = computeTeamEnvironmentIntel(teamEnvMap, teamStats, team);
+  const possessionEnvironment = computePossessionEnvironmentIntel(
+    playerName, team, opponentTeam, possessionProfile, positionPossessionAverages, teamFullStats,
+  );
   const roleEntry = roleTrends?.get(playerId);
   const roleIntelligence = computeRoleIntel(roleTrends, playerId, positionGroup, row);
   const cba = computeCbaIntel(roleEntry);
@@ -428,6 +532,13 @@ export function computePlayerIntelligence(input: PlayerIntelligenceInput): Playe
   if (teamEnvironment.label === 'POSITIVE' || teamEnvironment.label === 'HIGH') positives.push(teamEnvironment.reason);
   else if (teamEnvironment.label === 'NEGATIVE' || teamEnvironment.label === 'LOW') risks.push(teamEnvironment.reason);
   else if (teamEnvironment.label === 'INSUFFICIENT_DATA') missingData.push('Team Environment: ' + teamEnvironment.reason);
+
+  // Possession-style signals — display-only matchup intelligence, never blended
+  // into intelligenceScore (no explicit model-adjustment setting exists for it).
+  if (possessionEnvironment.uncontested.label === 'POSITIVE' || possessionEnvironment.uncontested.label === 'HIGH') positives.push('Positive uncontested matchup: ' + possessionEnvironment.uncontested.reason);
+  else if (possessionEnvironment.uncontested.label === 'NEGATIVE' || possessionEnvironment.uncontested.label === 'LOW') risks.push('Negative uncontested matchup: ' + possessionEnvironment.uncontested.reason);
+  if (possessionEnvironment.contested.label === 'POSITIVE' || possessionEnvironment.contested.label === 'HIGH') positives.push('Positive contested matchup: ' + possessionEnvironment.contested.reason);
+  else if (possessionEnvironment.contested.label === 'NEGATIVE' || possessionEnvironment.contested.label === 'LOW') risks.push('Negative contested matchup: ' + possessionEnvironment.contested.reason);
 
   if (roleIntelligence.label === 'ROLE_BOOST' || roleIntelligence.label === 'SLIGHT_BOOST') positives.push(roleIntelligence.reason);
   else if (roleIntelligence.label === 'ROLE_REDUCTION' || roleIntelligence.label === 'SLIGHT_REDUCTION') risks.push(roleIntelligence.reason);
@@ -466,7 +577,7 @@ export function computePlayerIntelligence(input: PlayerIntelligenceInput): Playe
 
   return {
     playerId, playerName, team, matchId,
-    positionEdge, teamEnvironment, roleIntelligence, cba, kickIns,
+    positionEdge, teamEnvironment, possessionEnvironment, roleIntelligence, cba, kickIns,
     positives: positives.slice(0, 3),
     risks: risks.slice(0, 3),
     missingData,
