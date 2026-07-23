@@ -611,6 +611,26 @@ export default function MultiOptimizerPanel({
 
   const safeLineCount = gameRecommendationsFiltered.filter(r => r.safeLine).length;
 
+  // Candidate Pool — how many unique players the "Best Individual Legs" list
+  // (and, via eligiblePlayerIds above, everything downstream that reads it)
+  // shows. "Recommended" is the previous safeLine-only behavior; the numeric
+  // options and "All" draw from every player with ANY valid line, ranked by
+  // best-available adjusted probability. Build Your Own Multi is never
+  // restricted by this — it already reads the full eligiblePlayerIds set.
+  const [candidatePoolSize, setCandidatePoolSize] = useState<'recommended' | 10 | 15 | 20 | 'all'>('recommended');
+
+  const candidateLegs = useMemo(() => {
+    if (candidatePoolSize === 'recommended') {
+      return gameRecommendationsFiltered.filter(r => r.safeLine);
+    }
+    const withBestLine = gameRecommendationsFiltered
+      .map(r => ({ rec: r, line: r.safeLine ?? r.balancedLine ?? r.valueLine }))
+      .filter((x): x is { rec: typeof x.rec; line: NonNullable<typeof x.line> } => x.line != null)
+      .sort((a, b) => (b.line.adjustedProb ?? b.line.finalProbability ?? 0) - (a.line.adjustedProb ?? a.line.finalProbability ?? 0));
+    const limited = candidatePoolSize === 'all' ? withBestLine : withBestLine.slice(0, candidatePoolSize);
+    return limited.map(x => ({ ...x.rec, safeLine: x.line }));
+  }, [gameRecommendationsFiltered, candidatePoolSize]);
+
   // ── Alternate-line custom builder ──────────────────────────────────────
   // Fetch every genuine bookmaker_odds row for the selected match (ladder + O/U),
   // same call PullEmDisposalMultiPanel already uses. Never derives Under odds
@@ -643,11 +663,18 @@ export default function MultiOptimizerPanel({
     return buildPullEmLegs(altLinesRows, matchNames, ALL_LINES_SETTINGS, selectedMatchId);
   }, [altLinesRows, matchNames, selectedMatchId]);
 
+  // Every player with ANY genuine valid line (safe, balanced, or value tier) —
+  // not just the strict "safe" subset. Previously this only included safeLine
+  // players, which silently capped Build Your Own Multi (and everything
+  // downstream of it) to the same small handful of players shown in Best
+  // Individual Legs, even though the model has real, valid lines for many
+  // more players who just don't clear the strictest safety bar.
   const eligiblePlayerIds = useMemo(() => {
     const ids = new Set<string>();
     for (const r of gameRecommendationsFiltered) {
-      if (!r.safeLine) continue;
-      const pid = r.safeLine.player_id ?? r.safeLine.resolvedPlayerId ?? '';
+      const line = r.safeLine ?? r.balancedLine ?? r.valueLine;
+      if (!line) continue;
+      const pid = line.player_id ?? line.resolvedPlayerId ?? '';
       if (pid) ids.add(pid);
     }
     return ids;
@@ -1203,12 +1230,34 @@ export default function MultiOptimizerPanel({
       {/* Section A — Best Individual Legs */}
       {gameRecommendationsFiltered.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h3 className="text-white font-semibold text-sm">Best Individual Disposal Legs</h3>
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-gray-500 uppercase">Candidate Pool</label>
+              <select
+                value={String(candidatePoolSize)}
+                onChange={e => {
+                  const v = e.target.value;
+                  setCandidatePoolSize(v === 'recommended' || v === 'all' ? v : (Number(v) as 10 | 15 | 20));
+                }}
+                className="bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1">
+                <option value="recommended">Recommended ({safeLineCount})</option>
+                <option value="10">Top 10</option>
+                <option value="15">Top 15</option>
+                <option value="20">Top 20</option>
+                <option value="all">All Valid Players</option>
+              </select>
+            </div>
             <span className="text-[10px] text-gray-500">Click a badge row to open Player Intelligence</span>
           </div>
+          <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+            <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Genuine Lines</p><p className="text-white font-bold">{allLinesResult?.legs.length ?? 0}</p></div>
+            <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Resolved Valid Lines</p><p className="text-white font-bold">{pickableLegs.length}</p></div>
+            <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Unique Valid Players</p><p className="text-cyan-400 font-bold">{eligiblePlayerIds.size}</p></div>
+            <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">In Candidate Pool</p><p className="text-emerald-400 font-bold">{candidateLegs.length}</p></div>
+          </div>
           <div className="space-y-2">
-            {gameRecommendationsFiltered.filter(r => r.safeLine).map((rec, i) => {
+            {candidateLegs.map((rec, i) => {
               const fr = rec.safeLine!.freshness;
               const isStale = fr && fr.freshnessStatus !== 'CURRENT';
               const pid = rec.safeLine!.player_id ?? rec.safeLine!.resolvedPlayerId ?? rec.playerId;
