@@ -111,6 +111,42 @@ function LegRow({ leg, index }: { leg: MultiCandidate['legs'][number]; index: nu
   );
 }
 
+type CategoryChecks = {
+  sufficientData: boolean;
+  matchupEnabled: boolean; matchupPositive: boolean;
+  environmentEnabled: boolean; environmentPositive: boolean;
+  roleEnabled: boolean; rolePositive: boolean;
+  negMatchupEnabled: boolean; negMatchupFail: boolean;
+  dataReqEnabled: boolean; dataReqFail: boolean;
+};
+
+/** Require Any Positive: passes if at least one ENABLED positive-style category
+ * is positive (negative-matchup / data-requirement are exclusion-style, not
+ * "positive" categories, so they still apply as hard excludes in this mode —
+ * only Position Edge / Team Environment / Role Boost participate in "any").
+ * Require All Positive: every enabled category (including the exclusion-style
+ * ones) must pass. */
+function passesApplicationMode(c: CategoryChecks, mode: 'REQUIRE_ANY' | 'REQUIRE_ALL'): boolean {
+  if (c.negMatchupFail) return false;
+  if (c.dataReqFail) return false;
+
+  const positiveCategoriesEnabled = c.matchupEnabled || c.environmentEnabled || c.roleEnabled;
+  if (!positiveCategoriesEnabled) return true;
+
+  if (mode === 'REQUIRE_ALL') {
+    if (c.matchupEnabled && !c.matchupPositive) return false;
+    if (c.environmentEnabled && !c.environmentPositive) return false;
+    if (c.roleEnabled && !c.rolePositive) return false;
+    return true;
+  }
+  // REQUIRE_ANY
+  const anyPositive =
+    (c.matchupEnabled && c.matchupPositive) ||
+    (c.environmentEnabled && c.environmentPositive) ||
+    (c.roleEnabled && c.rolePositive);
+  return anyPositive;
+}
+
 function positionBadgeColor(label: PlayerIntelligence['positionEdge']['label']): string {
   switch (label) {
     case 'VERY_POSITIVE': return 'bg-emerald-500/20 text-emerald-400';
@@ -241,6 +277,10 @@ export default function MultiOptimizerPanel({
   const [filterRoleBoost, setFilterRoleBoost] = useState(false);
   const [filterExcludeNegativeMatchup, setFilterExcludeNegativeMatchup] = useState(false);
   const [filterSufficientIntelData, setFilterSufficientIntelData] = useState(false);
+  // Rank Only (default): intelligence signals affect ordering only, never remove a leg.
+  // Require Any Positive: a leg passes if at least one enabled category is positive.
+  // Require All Positive: a leg must pass every enabled category (previous, strict-AND behavior).
+  const [intelligenceApplicationMode, setIntelligenceApplicationMode] = useState<'RANK_ONLY' | 'REQUIRE_ANY' | 'REQUIRE_ALL'>('RANK_ONLY');
   const [drawerPlayerId, setDrawerPlayerId] = useState<string | null>(null);
 
   // Load saved exclusions when the selected match changes
@@ -366,6 +406,25 @@ export default function MultiOptimizerPanel({
   // not gameRecommendations, so filtering is consistent everywhere.
   const intelligenceFilterActive = filterPositiveMatchup || filterPositiveEnvironment || filterRoleBoost || filterExcludeNegativeMatchup || filterSufficientIntelData;
 
+  // Per-category positive/negative checks, shared between diagnostics and filtering
+  // so "does this leg pass" is defined in exactly one place.
+  function categoryChecks(intel: PlayerIntelligence) {
+    const sufficientData = intel.positionEdge.label !== 'INSUFFICIENT_DATA' || intel.teamEnvironment.label !== 'INSUFFICIENT_DATA' || intel.roleIntelligence.label !== 'UNCERTAIN';
+    return {
+      sufficientData,
+      matchupEnabled: filterPositiveMatchup,
+      matchupPositive: intel.positionEdge.label === 'POSITIVE' || intel.positionEdge.label === 'VERY_POSITIVE',
+      environmentEnabled: filterPositiveEnvironment,
+      environmentPositive: intel.teamEnvironment.label === 'POSITIVE' || intel.teamEnvironment.label === 'HIGH',
+      roleEnabled: filterRoleBoost,
+      rolePositive: intel.roleIntelligence.label === 'ROLE_BOOST' || intel.roleIntelligence.label === 'SLIGHT_BOOST',
+      negMatchupEnabled: filterExcludeNegativeMatchup,
+      negMatchupFail: filterExcludeNegativeMatchup && (intel.positionEdge.label === 'NEGATIVE' || intel.positionEdge.label === 'VERY_NEGATIVE'),
+      dataReqEnabled: filterSufficientIntelData,
+      dataReqFail: filterSufficientIntelData && !sufficientData,
+    };
+  }
+
   const intelligenceFilterDiagnostics = useMemo(() => {
     let excludedByMatchup = 0;
     let excludedByEnvironment = 0;
@@ -379,6 +438,9 @@ export default function MultiOptimizerPanel({
     let withScore = 0;
     let missingSufficientData = 0;
     let eligibleLegs = 0;
+    let removedByApplicationMode = 0;
+    let uniqueCandidatePlayers = 0;
+    const seenPlayers = new Set<string>();
 
     for (const rec of gameRecommendations) {
       const row = rec.safeLine;
@@ -388,48 +450,59 @@ export default function MultiOptimizerPanel({
       if (!intel) continue;
 
       eligibleLegs++;
+      if (pid && !seenPlayers.has(pid)) { seenPlayers.add(pid); uniqueCandidatePlayers++; }
       if (intel.positionEdge.label !== 'INSUFFICIENT_DATA') withPositionEdge++;
       if (intel.teamEnvironment.label !== 'INSUFFICIENT_DATA') withTeamEnvironment++;
       if (intel.roleIntelligence.label !== 'UNCERTAIN') withRoleIntelligence++;
       if (intel.cba.available) withCba++;
       if (intel.kickIns.available) withKickIns++;
       if (intel.intelligenceScore !== null) withScore++;
-      const sufficientData = intel.positionEdge.label !== 'INSUFFICIENT_DATA' || intel.teamEnvironment.label !== 'INSUFFICIENT_DATA' || intel.roleIntelligence.label !== 'UNCERTAIN';
-      if (!sufficientData) missingSufficientData++;
+      const c = categoryChecks(intel);
+      if (!c.sufficientData) missingSufficientData++;
 
-      if (filterPositiveMatchup && !(intel.positionEdge.label === 'POSITIVE' || intel.positionEdge.label === 'VERY_POSITIVE')) excludedByMatchup++;
-      if (filterPositiveEnvironment && !(intel.teamEnvironment.label === 'POSITIVE' || intel.teamEnvironment.label === 'HIGH')) excludedByEnvironment++;
-      if (filterRoleBoost && !(intel.roleIntelligence.label === 'ROLE_BOOST' || intel.roleIntelligence.label === 'SLIGHT_BOOST')) excludedByRole++;
-      if (filterExcludeNegativeMatchup && (intel.positionEdge.label === 'NEGATIVE' || intel.positionEdge.label === 'VERY_NEGATIVE')) excludedByMatchup++;
-      if (filterSufficientIntelData && !sufficientData) excludedByDataRequirement++;
+      if (c.matchupEnabled && !c.matchupPositive) excludedByMatchup++;
+      if (c.environmentEnabled && !c.environmentPositive) excludedByEnvironment++;
+      if (c.roleEnabled && !c.rolePositive) excludedByRole++;
+      if (c.negMatchupEnabled && c.negMatchupFail) excludedByMatchup++;
+      if (c.dataReqFail) excludedByDataRequirement++;
+
+      if (intelligenceFilterActive && intelligenceApplicationMode !== 'RANK_ONLY' && !passesApplicationMode(c, intelligenceApplicationMode)) {
+        removedByApplicationMode++;
+      }
     }
 
     return {
-      eligibleLegs,
+      eligibleLegs, uniqueCandidatePlayers,
       withPositionEdge, withTeamEnvironment, withRoleIntelligence, withCba, withKickIns, withScore,
       missingSufficientData, excludedByMatchup, excludedByEnvironment, excludedByRole, excludedByDataRequirement,
+      removedByApplicationMode,
+      finalCandidateLines: eligibleLegs - (intelligenceApplicationMode === 'RANK_ONLY' ? 0 : removedByApplicationMode),
     };
-  }, [gameRecommendations, intelligenceByPlayer, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData]);
+  }, [gameRecommendations, intelligenceByPlayer, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData, intelligenceApplicationMode, intelligenceFilterActive]);
 
   const gameRecommendationsFiltered = useMemo(() => {
-    if (!intelligenceFilterActive) return gameRecommendations;
+    // Rank Only: never remove a leg for missing/negative intelligence — signals
+    // are display + ordering only. Still sort so positive signals rank first.
+    if (!intelligenceFilterActive || intelligenceApplicationMode === 'RANK_ONLY') {
+      if (!intelligenceFilterActive) return gameRecommendations;
+      return [...gameRecommendations].sort((a, b) => {
+        const rowA = a.safeLine; const rowB = b.safeLine;
+        const pidA = rowA?.player_id ?? rowA?.resolvedPlayerId ?? a.playerId;
+        const pidB = rowB?.player_id ?? rowB?.resolvedPlayerId ?? b.playerId;
+        const scoreA = intelligenceByPlayer.get(pidA)?.intelligenceScore ?? -Infinity;
+        const scoreB = intelligenceByPlayer.get(pidB)?.intelligenceScore ?? -Infinity;
+        return scoreB - scoreA;
+      });
+    }
     return gameRecommendations.filter(rec => {
       const row = rec.safeLine;
       if (!row) return false;
       const pid = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
       const intel = intelligenceByPlayer.get(pid);
       if (!intel) return false;
-
-      const sufficientData = intel.positionEdge.label !== 'INSUFFICIENT_DATA' || intel.teamEnvironment.label !== 'INSUFFICIENT_DATA' || intel.roleIntelligence.label !== 'UNCERTAIN';
-
-      if (filterPositiveMatchup && !(intel.positionEdge.label === 'POSITIVE' || intel.positionEdge.label === 'VERY_POSITIVE')) return false;
-      if (filterPositiveEnvironment && !(intel.teamEnvironment.label === 'POSITIVE' || intel.teamEnvironment.label === 'HIGH')) return false;
-      if (filterRoleBoost && !(intel.roleIntelligence.label === 'ROLE_BOOST' || intel.roleIntelligence.label === 'SLIGHT_BOOST')) return false;
-      if (filterExcludeNegativeMatchup && (intel.positionEdge.label === 'NEGATIVE' || intel.positionEdge.label === 'VERY_NEGATIVE')) return false;
-      if (filterSufficientIntelData && !sufficientData) return false;
-      return true;
+      return passesApplicationMode(categoryChecks(intel), intelligenceApplicationMode);
     });
-  }, [gameRecommendations, intelligenceByPlayer, intelligenceFilterActive, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData]);
+  }, [gameRecommendations, intelligenceByPlayer, intelligenceFilterActive, intelligenceApplicationMode, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData]);
 
   // Unique players from the recommendations for the selected match — for the exclusion UI
   const matchPlayers = useMemo(() => {
@@ -1014,9 +1087,40 @@ export default function MultiOptimizerPanel({
           </label>
         </div>
 
+        {/* Intelligence Application Mode — controls whether the categories above
+            can ever remove a leg, or only affect ordering. */}
+        <div className="mt-3 pt-3 border-t border-gray-800">
+          <p className="text-[10px] text-gray-500 uppercase mb-1.5">Intelligence Application Mode</p>
+          <div className="flex flex-wrap gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+              <input type="radio" name="intelAppMode" checked={intelligenceApplicationMode === 'RANK_ONLY'} onChange={() => setIntelligenceApplicationMode('RANK_ONLY')} className="accent-cyan-500" />
+              Rank Only <span className="text-gray-500">(default — never removes a leg)</span>
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+              <input type="radio" name="intelAppMode" checked={intelligenceApplicationMode === 'REQUIRE_ANY'} onChange={() => setIntelligenceApplicationMode('REQUIRE_ANY')} className="accent-amber-500" />
+              Require Any Positive
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+              <input type="radio" name="intelAppMode" checked={intelligenceApplicationMode === 'REQUIRE_ALL'} onChange={() => setIntelligenceApplicationMode('REQUIRE_ALL')} className="accent-red-500" />
+              Require All Positive
+            </label>
+          </div>
+          {intelligenceApplicationMode === 'REQUIRE_ALL' && (
+            <p className="mt-1.5 text-[10px] text-amber-400 flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3" /> Requiring every enabled category to be positive can reduce the candidate pool to zero.
+            </p>
+          )}
+          {intelligenceFilterActive && intelligenceApplicationMode !== 'RANK_ONLY' && gameRecommendationsFiltered.filter(r => r.safeLine).length === 0 && intelligenceFilterDiagnostics.eligibleLegs > 0 && (
+            <p className="mt-1.5 text-[10px] text-red-400">
+              0 legs remain under {intelligenceApplicationMode === 'REQUIRE_ALL' ? '"Require All Positive"' : '"Require Any Positive"'} — {intelligenceFilterDiagnostics.removedByApplicationMode} of {intelligenceFilterDiagnostics.eligibleLegs} eligible legs were removed by the selected filters. Try switching to {intelligenceApplicationMode === 'REQUIRE_ALL' ? '"Require Any Positive" or ' : ''}"Rank Only".
+            </p>
+          )}
+        </div>
+
         {/* Intelligence diagnostics — reconciles with the shared eligible-leg pool */}
         <div className="mt-3 pt-3 border-t border-gray-800 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2 text-[10px]">
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Eligible Legs</p><p className="text-white font-bold">{intelligenceFilterDiagnostics.eligibleLegs}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Unique Players</p><p className="text-white font-bold">{intelligenceFilterDiagnostics.uniqueCandidatePlayers}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Position Edge</p><p className="text-cyan-400 font-bold">{intelligenceFilterDiagnostics.withPositionEdge}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Team Env</p><p className="text-cyan-400 font-bold">{intelligenceFilterDiagnostics.withTeamEnvironment}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Role Intel</p><p className="text-cyan-400 font-bold">{intelligenceFilterDiagnostics.withRoleIntelligence}</p></div>
@@ -1028,6 +1132,7 @@ export default function MultiOptimizerPanel({
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Environment</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.excludedByEnvironment}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Role</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.excludedByRole}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Data Req.</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.excludedByDataRequirement}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Removed By Mode</p><p className="text-orange-400 font-bold">{intelligenceApplicationMode === 'RANK_ONLY' ? 0 : intelligenceFilterDiagnostics.removedByApplicationMode}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">After Filters</p><p className="text-white font-bold">{gameRecommendationsFiltered.filter(r => r.safeLine).length}</p></div>
         </div>
       </div>
