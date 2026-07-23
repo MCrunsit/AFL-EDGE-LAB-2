@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { CheckCircle, AlertTriangle, XCircle, RefreshCw, ClipboardCheck } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { normalizePlayerName } from '../lib/playerMatching';
+import { fetchAllRows } from '../lib/supabasePagination';
 
 type CheckStatus = 'ready' | 'warning' | 'broken' | 'loading';
 
@@ -61,7 +62,15 @@ export default function RoundReadyChecklist() {
     // ------------------------------------------------------------------
     const today = new Date().toISOString().split('T')[0];
 
-    const [matchesRes, oddsCountRes, altLadderCountRes, playersRes, statsCountRes, statsVenueOppRes, positionGroupRes] = await Promise.all([
+    // All players — fully paginated. An unpaginated select here was silently
+    // capped at Supabase's 1000-row default out of ~2850 real players,
+    // falsely flagging genuine players as "unmatched" in the Player matching
+    // check below whenever their name wasn't in the truncated first 1000.
+    const allPlayersData = await fetchAllRows<{ id: string; name: string; position_group: string | null }>(
+      supabase, 'players', 'id, name, position_group',
+    );
+
+    const [matchesRes, oddsCountRes, altLadderCountRes, statsCountRes, statsVenueOppRes, positionGroupRes] = await Promise.all([
       // Upcoming matches (current round)
       supabase
         .from('matches')
@@ -81,11 +90,6 @@ export default function RoundReadyChecklist() {
         .from('bookmaker_odds')
         .select('id', { count: 'exact', head: true })
         .eq('market_type', 'alt_ladder'),
-
-      // All players
-      supabase
-        .from('players')
-        .select('id, name, position_group'),
 
       // Player game stats count
       supabase
@@ -151,7 +155,7 @@ export default function RoundReadyChecklist() {
 
       // Build a set of normalized player names from the players table
       const playerNames = new Set<string>();
-      for (const p of (playersRes.data ?? [])) {
+      for (const p of allPlayersData) {
         playerNames.add(normalizePlayerName(p.name));
       }
 
@@ -262,7 +266,7 @@ export default function RoundReadyChecklist() {
     }
 
     // 7. Position group mapping > 90%
-    const totalPlayers = playersRes.data?.length ?? 0;
+    const totalPlayers = allPlayersData.length;
     const playersWithPosition = positionGroupRes.count ?? 0;
     const positionRate = totalPlayers > 0 ? (playersWithPosition / totalPlayers) * 100 : 0;
     if (totalPlayers === 0) {

@@ -2,6 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Activity, TrendingUp, TrendingDown, Zap, Minus, ArrowRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { fetchAllRows } from '../lib/supabasePagination';
 import type { Player, PlayerGameStat, EnrichedStat, StatType } from '../lib/types';
 import { detectTrend, sortStatsByDate, calcAvgForStats, getLastN, average } from '../lib/analytics';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -44,19 +45,23 @@ export default function TrendEnginePage() {
   const [topBottom, setTopBottom] = useState<{ top: Set<string>; bottom: Set<string> }>({ top: new Set(), bottom: new Set() });
 
   useEffect(() => {
+    // player_game_stats and enriched_player_stats are fully paginated — both
+    // have several thousand rows and an unpaginated select was silently
+    // capped at Supabase's 1000-row default, limiting trend detection to
+    // only the most recent games instead of full season history.
     Promise.all([
       supabase.from('current_players').select('*').order('name'),
-      supabase.from('player_game_stats').select('*').order('match_date', { ascending: false }),
-      supabase.from('enriched_player_stats').select('*').order('match_date', { ascending: false }),
+      fetchAllRows<PlayerGameStat>(supabase, 'player_game_stats', '*'),
+      fetchAllRows<EnrichedStat>(supabase, 'enriched_player_stats', '*'),
     ]).then(([p, s, es]) => {
       setPlayers(p.data ?? []);
-      setAllStats(s.data ?? []);
-      setEnrichedStats(es.data ?? []);
+      setAllStats(s);
+      setEnrichedStats(es);
       setLoading(false);
 
       // Compute top/bottom 8 teams by win frequency from stats data
       const teamWins = new Map<string, number>();
-      for (const stat of s.data ?? []) {
+      for (const stat of s) {
         const t = stat.team;
         if (t) teamWins.set(t, (teamWins.get(t) ?? 0) + 1);
       }

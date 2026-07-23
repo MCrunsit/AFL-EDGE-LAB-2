@@ -8,6 +8,7 @@ import RoundReadyChecklist from '../components/RoundReadyChecklist';
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { getDataStatus } from '../lib/playerStatsSync';
+import { fetchAllRows } from '../lib/supabasePagination';
 import type { Player, PlayerGameStat } from '../lib/types';
 import {
   calcAvgForStats, getLastN, consistencyRating, sortStatsByDate, detectTrend, average
@@ -25,14 +26,16 @@ export default function DashboardPage() {
   const [dataStatus, setDataStatus] = useState<{ status: 'READY' | 'WARNING' | 'BROKEN'; latestCompletedRound: string | null; latestStatRound: string | null; isStale: boolean; reasons: string[] } | null>(null);
 
   useEffect(() => {
-    supabase
-      .from('player_game_stats')
-      .select('*')
-      .order('match_date', { ascending: false })
-      .then(({ data }) => {
-        setAllStats(data ?? []);
+    // Fully paginated — an unpaginated select here was silently capped at
+    // Supabase's 1000-row default out of ~7000+ stat rows, so leaderboards
+    // (Top Disposal, Most Consistent, etc.) only ever considered the most
+    // recent ~1000 rows instead of full-season data.
+    fetchAllRows<PlayerGameStat>(supabase, 'player_game_stats', '*')
+      .then(data => {
+        setAllStats(data);
         setStatsLoading(false);
-      });
+      })
+      .catch(() => setStatsLoading(false));
     getDataStatus(new Date().getFullYear()).then(setDataStatus);
   }, []);
 

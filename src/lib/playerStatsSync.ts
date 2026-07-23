@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { normalizeTeamName } from './positionEdge';
+import { fetchAllRows } from './supabasePagination';
 
 export interface StatsSyncDiagnostics {
   latestCompletedRound: string | null;
@@ -128,14 +129,15 @@ export async function dryRunStatsCheck(season: number): Promise<StatsSyncDiagnos
     return diagnostics;
   }
 
-  // Get all match_ids that have player_game_stats
-  const { data: existingStats } = await supabase
-    .from('player_game_stats')
-    .select('match_id')
-    .not('match_id', 'is', null);
+  // Get all match_ids that have player_game_stats. Fully paginated — an
+  // unpaginated select here was silently capped at Supabase's 1000-row
+  // default, falsely reporting matches that actually have stats as missing.
+  const existingStats = await fetchAllRows<{ match_id: string | null }>(
+    supabase, 'player_game_stats', 'match_id', (q) => q.not('match_id', 'is', null),
+  );
 
   const matchesWithStats = new Set<string>();
-  for (const s of existingStats ?? []) {
+  for (const s of existingStats) {
     if (s.match_id) matchesWithStats.add(s.match_id);
   }
 
@@ -202,14 +204,15 @@ export async function backfillMissingRounds(season: number): Promise<BackfillDia
 
   diagnostics.matchesFound = completedMatches.length;
 
-  // Get all match_ids that have player_game_stats
-  const { data: existingStats } = await supabase
-    .from('player_game_stats')
-    .select('match_id')
-    .not('match_id', 'is', null);
+  // Get all match_ids that have player_game_stats. Fully paginated — an
+  // unpaginated select here was silently capped at Supabase's 1000-row
+  // default, falsely reporting matches that actually have stats as missing.
+  const existingStats = await fetchAllRows<{ match_id: string | null }>(
+    supabase, 'player_game_stats', 'match_id', (q) => q.not('match_id', 'is', null),
+  );
 
   const matchesWithStats = new Set<string>();
-  for (const s of existingStats ?? []) {
+  for (const s of existingStats) {
     if (s.match_id) matchesWithStats.add(s.match_id);
   }
 
@@ -401,14 +404,18 @@ export async function deduplicateStats(): Promise<{ duplicatesRemoved: number; e
   let duplicatesRemoved = 0;
   const errors: string[] = [];
 
-  // Find duplicates by player_id + match_id
-  const { data: allStats } = await supabase
-    .from('player_game_stats')
-    .select('id, player_id, match_id, match_date')
-    .not('match_id', 'is', null)
-    .order('created_at', { ascending: true });
-
-  if (!allStats) return { duplicatesRemoved: 0, errors: ['Failed to fetch stats'] };
+  // Find duplicates by player_id + match_id. Fully paginated — an
+  // unpaginated select here was silently capped at Supabase's 1000-row
+  // default (ordered by created_at asc), so only the first ~1000 rows were
+  // ever checked for duplicates and the rest of the table was never
+  // deduplicated.
+  let allStats: { id: string; player_id: string; match_id: string | null; match_date: string }[];
+  try {
+    allStats = await fetchAllRows(supabase, 'player_game_stats', 'id, player_id, match_id, match_date',
+      (q) => q.not('match_id', 'is', null));
+  } catch {
+    return { duplicatesRemoved: 0, errors: ['Failed to fetch stats'] };
+  }
 
   const seen = new Map<string, string>(); // player_id|match_id -> kept id
   const toDelete: string[] = [];
