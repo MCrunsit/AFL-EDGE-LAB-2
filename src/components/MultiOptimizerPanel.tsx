@@ -383,7 +383,11 @@ export default function MultiOptimizerPanel({
   const intelligenceByPlayer = useMemo(() => {
     const map = new Map<string, PlayerIntelligence>();
     for (const rec of gameRecommendations) {
-      const row = rec.safeLine;
+      // Same broadening as eligiblePlayerIds/candidateLegs — a player with only
+      // a balancedLine/valueLine (no strict safeLine) still gets an intelligence
+      // entry, so Top 10/15/20/All Valid Players show real badges instead of
+      // blank rows for anyone beyond the "Recommended" safeLine-only subset.
+      const row = rec.safeLine ?? rec.balancedLine ?? rec.valueLine;
       if (!row) continue;
       const playerId = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
       if (!playerId || map.has(playerId)) continue;
