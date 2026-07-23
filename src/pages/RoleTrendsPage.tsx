@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Users, Loader2, AlertCircle, Upload, Info } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { normalizeTeam } from '../lib/teamNormalizer';
+import { fetchAllRows } from '../lib/supabasePagination';
 
 interface RoleDataRow {
   player_id: string | null;
@@ -49,19 +50,27 @@ export default function RoleTrendsPage() {
     setLoading(true);
     setError(null);
     try {
-      const { data: rows, error } = await supabase
-        .from('player_role_data')
-        .select('player_id, round, cba_percentage, cba_count, team_cba_total, kick_in_count, kick_in_play_on_count, kick_in_share, source, updated_at')
-        .order('updated_at', { ascending: false });
-
-      if (error) throw error;
-      // Query selects a subset of player_role_data columns; RoleDataRow is the
-      // display shape. Cast preserves existing runtime behaviour.
-      setData((rows ?? []) as unknown as RoleDataRow[]);
+      // Fully paginated — an unpaginated select here was silently capped at
+      // Supabase's 1000-row default out of ~7200 role rows for a full season,
+      // the same bug already fixed in roleTrendService.ts (this page has its
+      // own separate, independent query that had the identical issue).
+      const [rawRows, players] = await Promise.all([
+        fetchAllRows<any>(supabase, 'player_role_data',
+          'player_id, round, cba_percentage, cba_count, team_cba_total, kick_in_count, kick_in_play_on_count, kick_in_share, source, updated_at'),
+        fetchAllRows<{ id: string; name: string; team: string }>(supabase, 'players', 'id, name, team'),
+      ]);
+      const playerById = new Map(players.map(p => [p.id, p]));
+      const rows = rawRows.map(r => ({
+        ...r,
+        player_name: playerById.get(r.player_id)?.name ?? 'Unknown',
+        team: playerById.get(r.player_id)?.team ?? '',
+        match_date: '',
+      }));
+      setData(rows as unknown as RoleDataRow[]);
 
       // Build player summaries
       const byPlayer = new Map<string, RoleDataRow[]>();
-      for (const row of (rows ?? [])) {
+      for (const row of rows) {
         const key = row.player_id ?? 'unknown';
         if (!byPlayer.has(key)) byPlayer.set(key, []);
         byPlayer.get(key)!.push(row as any);
@@ -69,7 +78,15 @@ export default function RoleTrendsPage() {
 
       const playerSummaries: PlayerRoleSummary[] = [];
       for (const [playerId, records] of byPlayer) {
-        const sorted = records.sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
+        // Sort by round chronologically, not updated_at (row touch time) — the
+        // same fix as roleTrendService.ts, for the same reason: sorting by
+        // update time let a re-synced early round outrank genuinely later ones.
+        const sorted = [...records].sort((a, b) => {
+          const ra = parseInt(a.round, 10);
+          const rb = parseInt(b.round, 10);
+          if (!Number.isNaN(ra) && !Number.isNaN(rb) && ra !== rb) return rb - ra;
+          return (b.updated_at ?? '').localeCompare(a.updated_at ?? '');
+        });
         const last5 = sorted.slice(0, 5);
         const last3 = sorted.slice(0, 3);
 
@@ -256,9 +273,9 @@ export default function RoleTrendsPage() {
                 <tr key={s.playerId} className="border-b border-gray-800/30 hover:bg-gray-800/30">
                   <td className="py-2 px-3 text-white font-medium">{s.playerName}</td>
                   <td className="py-2 px-3 text-gray-400">{s.team}</td>
-                  <td className="py-2 px-3 text-right text-gray-300">{s.cbaSeasonAvg.toFixed(1)}</td>
-                  <td className="py-2 px-3 text-right text-gray-300">{s.cbaLast5.toFixed(1)}</td>
-                  <td className="py-2 px-3 text-right text-gray-300">{s.cbaLast3.toFixed(1)}</td>
+                  <td className="py-2 px-3 text-right text-gray-300">{(s.cbaSeasonAvg * 100).toFixed(0)}%</td>
+                  <td className="py-2 px-3 text-right text-gray-300">{(s.cbaLast5 * 100).toFixed(0)}%</td>
+                  <td className="py-2 px-3 text-right text-gray-300">{(s.cbaLast3 * 100).toFixed(0)}%</td>
                   <td className="py-2 px-3 text-center">
                     <span className={s.cbaTrend === 'Positive' ? 'text-emerald-400' : s.cbaTrend === 'Negative' ? 'text-red-400' : 'text-gray-500'}>{s.cbaTrend}</span>
                   </td>
