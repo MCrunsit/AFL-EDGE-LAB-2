@@ -1025,14 +1025,33 @@ export default function MultiOptimizerPanel({
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <label className="text-[10px] text-gray-500 uppercase">Line Safety</label>
-            <select value={lineSafety} onChange={e => onLineSafetyChange(e.target.value as LineSafetyMode)}
-              className="bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1">
-              <option value="conservative">Conservative</option>
-              <option value="safe">Safe</option>
-              <option value="balanced">Balanced</option>
-            </select>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-gray-500 uppercase">Target Legs</label>
+              <select
+                value={settings.preferredLegs}
+                onChange={e => {
+                  const n = Number(e.target.value);
+                  // This is the single value the generator itself reads (settings.preferredLegs /
+                  // maxLegsPerMatch) — no separate "displayed" number that can drift from what's
+                  // actually generated, which was the previous contradiction (dropdown said 2,
+                  // generator produced 4 because it read a different, hardcoded preset value).
+                  setSettings({ ...settings, preferredLegs: n, fallbackLegs: Math.max(2, n - 1), maxLegsPerMatch: mode === 'gameMulti' ? n : settings.maxLegsPerMatch });
+                  setStaleResults(multis.length > 0);
+                }}
+                className="bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1">
+                {Array.from({ length: 9 }, (_, i) => i + 2).map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] text-gray-500 uppercase">Line Safety</label>
+              <select value={lineSafety} onChange={e => onLineSafetyChange(e.target.value as LineSafetyMode)}
+                className="bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1">
+                <option value="conservative">Conservative</option>
+                <option value="safe">Safe</option>
+                <option value="balanced">Balanced</option>
+              </select>
+            </div>
           </div>
         </div>
 
