@@ -634,13 +634,24 @@ export default function MultiOptimizerPanel({
   // it must not silently hide valid players with genuine bookmaker odds.
   const [candidatePoolSize, setCandidatePoolSize] = useState<'recommended' | 10 | 15 | 20 | 'all'>('all');
 
+  // "Best Individual Disposal Legs" is a recommendation list, not the full
+  // valid-player pool — every line shown here must stay within a genuinely
+  // safe individual-leg price, matching what actually feeds automatic multis
+  // (which only ever use safeLine). Expanding the Candidate Pool controls how
+  // MANY safe players are shown, never whether a risky line sneaks in — that
+  // was a real bug: balancedLine/valueLine fallback had no odds ceiling,
+  // so Top 10/15/20/All could surface individual legs above $2.00+. Build
+  // Your Own Multi is intentionally unrestricted (shows every genuine line);
+  // this cap applies only to the recommended list.
+  const MAX_RECOMMENDED_LEG_ODDS = 1.40;
   const candidateLegs = useMemo(() => {
     if (candidatePoolSize === 'recommended') {
       return gameRecommendationsFiltered.filter(r => r.safeLine);
     }
     const withBestLine = gameRecommendationsFiltered
       .map(r => ({ rec: r, line: r.safeLine ?? r.balancedLine ?? r.valueLine }))
-      .filter((x): x is { rec: typeof x.rec; line: NonNullable<typeof x.line> } => x.line != null)
+      .filter((x): x is { rec: typeof x.rec; line: NonNullable<typeof x.line> } =>
+        x.line != null && x.line.over_odds <= MAX_RECOMMENDED_LEG_ODDS)
       .sort((a, b) => (b.line.adjustedProb ?? b.line.finalProbability ?? 0) - (a.line.adjustedProb ?? a.line.finalProbability ?? 0));
     const limited = candidatePoolSize === 'all' ? withBestLine : withBestLine.slice(0, candidatePoolSize);
     return limited.map(x => ({ ...x.rec, safeLine: x.line }));
