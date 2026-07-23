@@ -344,17 +344,19 @@ Deno.serve(async (req: Request) => {
 
     // ─── ACTION: inspect_kali_raw ───
     if (action === "inspect_kali_raw") {
-      // Read-only. Zero database writes. Fetches one real match's raw Kali
-      // response and returns field names so callers can confirm what exists.
+      // Read-only. Zero database writes. Calls /player-stats-advanced and
+      // /player-stats with the correct match_id param and confirms field names.
       try {
-        // Find the most recent completed 2026 match that has an api_match_id
+        // Select the most recent genuinely completed 2026 match (date <= today)
         const { data: recentMatches, error: matchErr } = await supabase
           .from("matches")
-          .select("id, api_match_id, round, home_team, away_team, match_date")
+          .select("id, api_match_id, round, home_team, away_team, match_date, home_score, away_score")
           .eq("season", 2026)
-          .not("api_match_id", "is", null)
+          .lte("match_date", "2026-07-23")
+          .not("home_score", "is", null)
+          .not("away_score", "is", null)
           .order("match_date", { ascending: false })
-          .limit(10);
+          .limit(20);
 
         if (matchErr) {
           result.errors.push(`DB error fetching matches: ${matchErr.message}`);
@@ -364,102 +366,249 @@ Deno.serve(async (req: Request) => {
           });
         }
 
-        const match = (recentMatches ?? []).find((m: any) => m.api_match_id);
+        // Pick first match that has an api_match_id and valid teams
+        const match = (recentMatches ?? []).find(
+          (m: any) => m.api_match_id && m.home_team && m.away_team
+        );
+
         if (!match) {
-          result.errors.push("No 2026 match with api_match_id found in database");
+          result.errors.push("No completed 2026 match on or before 2026-07-23 found with api_match_id, home_team, away_team");
           return new Response(JSON.stringify(result), {
             status: 200,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
 
-        const localMatchId = match.id;
-        const kaliMatchId = match.api_match_id;
+        const localMatchId: string = match.id;
+        let kaliMatchId: string = match.api_match_id;
+        let kaliMatchResolutionMethod = "stored_api_match_id";
 
-        // Try advanced-player-stats first, fall back to player-stats
-        const endpoints = [
-          `/advanced-player-stats?matchId=${kaliMatchId}&limit=1`,
-          `/player-stats?matchId=${kaliMatchId}&limit=1`,
-        ];
-
-        let lastEndpoint = "";
-        let lastHttpStatus = 0;
-        let rawData: any = null;
-
-        for (const ep of endpoints) {
-          lastEndpoint = `${KALI_BASE}${ep}`;
+        // If api_match_id looks suspicious (e.g. it's a UUID not a Kali integer),
+        // attempt to resolve via the Kali /matches endpoint
+        if (!/^\d+$/.test(kaliMatchId)) {
+          result.debug_log.push(`api_match_id "${kaliMatchId}" is not a Kali integer — attempting resolution via /matches`);
+          const kaliSeason = 2026;
+          const homeSlug = toKaliSlug(match.home_team);
+          const awaySlug = toKaliSlug(match.away_team);
+          const matchListUrl = `/matches?season=${kaliSeason}&limit=200&offset=0`;
           try {
-            const url = `${KALI_BASE}${ep}`;
-            const resp = await fetch(url, {
-              headers: {
-                "Authorization": `Bearer ${apiKey}`,
-                "Accept": "application/json",
-              },
+            const matchListResp = await fetch(`${KALI_BASE}${matchListUrl}`, {
+              headers: { "Authorization": `Bearer ${apiKey}`, "Accept": "application/json" },
             });
-            lastHttpStatus = resp.status;
             result.requests_used += 1;
-            const remaining = resp.headers.get("x-ratelimit-remaining");
-            if (remaining) result.requests_remaining = parseInt(remaining, 10);
-
-            if (resp.ok) {
-              rawData = await resp.json();
-              break;
+            const rem = matchListResp.headers.get("x-ratelimit-remaining");
+            if (rem) result.requests_remaining = parseInt(rem, 10);
+            if (matchListResp.ok) {
+              const matchListData = await matchListResp.json();
+              const kaliMatches: KaliMatch[] = Array.isArray(matchListData)
+                ? matchListData
+                : (matchListData?.data ?? []);
+              // Match by team slugs and approximate date
+              const matchDate = match.match_date?.slice(0, 10) ?? "";
+              const resolved = kaliMatches.find((km: KaliMatch) => {
+                const kHome = (km.homeShortName ?? km.homeTeam ?? "").toLowerCase().replace(/\s+/g, "-");
+                const kAway = (km.awayShortName ?? km.awayTeam ?? "").toLowerCase().replace(/\s+/g, "-");
+                const kDate = (km.date ?? "").slice(0, 10);
+                return (
+                  (kHome === homeSlug || kAway === awaySlug) &&
+                  Math.abs(new Date(kDate).getTime() - new Date(matchDate).getTime()) < 86400000 * 3
+                );
+              });
+              if (resolved) {
+                kaliMatchId = String(resolved.id);
+                kaliMatchResolutionMethod = "resolved_via_kali_matches_endpoint";
+                result.debug_log.push(`Resolved Kali match ID: ${kaliMatchId} (${resolved.homeTeam} vs ${resolved.awayTeam})`);
+              } else {
+                result.errors.push(`Could not resolve Kali integer match ID for ${match.home_team} vs ${match.away_team} on ${matchDate}`);
+                return new Response(JSON.stringify(result), {
+                  status: 200,
+                  headers: { ...corsHeaders, "Content-Type": "application/json" },
+                });
+              }
+            } else {
+              const body = await matchListResp.text();
+              result.errors.push(`Kali /matches returned ${matchListResp.status}: ${body.slice(0, 200)}`);
+              return new Response(JSON.stringify(result), {
+                status: 200,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
             }
-            // Non-200 — try next endpoint
           } catch (fetchErr: any) {
-            result.errors.push(`Fetch error for ${ep}: ${fetchErr.message}`);
+            result.errors.push(`Fetch error resolving Kali match ID: ${fetchErr.message}`);
+            return new Response(JSON.stringify(result), {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
           }
         }
 
-        if (!rawData) {
-          result.errors.push(`No successful response from any endpoint (last status: ${lastHttpStatus})`);
-          return new Response(JSON.stringify(result), {
-            status: 200,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
+        const expectedTeams = [
+          normalizeTeam(match.home_team).toLowerCase(),
+          normalizeTeam(match.away_team).toLowerCase(),
+        ];
+
+        // ── Call /player-stats-advanced with correct match_id param ──
+        const advancedEndpointPath = `/player-stats-advanced?match_id=${kaliMatchId}&limit=200&offset=0`;
+        const advancedEndpointUrl = `${KALI_BASE}${advancedEndpointPath}`;
+        let advancedHttpStatus = 0;
+        let advancedRawData: any = null;
+        let advancedErrorBody = "";
+
+        try {
+          const advResp = await fetch(advancedEndpointUrl, {
+            headers: { "Authorization": `Bearer ${apiKey}`, "Accept": "application/json" },
           });
+          advancedHttpStatus = advResp.status;
+          result.requests_used += 1;
+          const rem = advResp.headers.get("x-ratelimit-remaining");
+          if (rem) result.requests_remaining = parseInt(rem, 10);
+          if (advResp.ok) {
+            advancedRawData = await advResp.json();
+          } else {
+            advancedErrorBody = (await advResp.text()).slice(0, 500);
+          }
+        } catch (fetchErr: any) {
+          advancedErrorBody = `Fetch threw: ${fetchErr.message}`;
         }
 
-        // Extract first player record
-        const players: any[] = Array.isArray(rawData)
-          ? rawData
-          : Array.isArray(rawData?.data)
-          ? rawData.data
+        // ── Call /player-stats with correct match_id param ──
+        const standardEndpointPath = `/player-stats?match_id=${kaliMatchId}&limit=200&offset=0`;
+        const standardEndpointUrl = `${KALI_BASE}${standardEndpointPath}`;
+        let standardHttpStatus = 0;
+        let standardRawData: any = null;
+        let standardErrorBody = "";
+
+        try {
+          const stdResp = await fetch(standardEndpointUrl, {
+            headers: { "Authorization": `Bearer ${apiKey}`, "Accept": "application/json" },
+          });
+          standardHttpStatus = stdResp.status;
+          result.requests_used += 1;
+          const rem = stdResp.headers.get("x-ratelimit-remaining");
+          if (rem) result.requests_remaining = parseInt(rem, 10);
+          if (stdResp.ok) {
+            standardRawData = await stdResp.json();
+          } else {
+            standardErrorBody = (await stdResp.text()).slice(0, 500);
+          }
+        } catch (fetchErr: any) {
+          standardErrorBody = `Fetch threw: ${fetchErr.message}`;
+        }
+
+        // ── Parse advanced players ──
+        const advancedPlayers: any[] = advancedRawData
+          ? (Array.isArray(advancedRawData) ? advancedRawData : (advancedRawData?.data ?? []))
           : [];
 
-        const firstPlayer = players[0] ?? null;
-        const allFieldNames: string[] = firstPlayer ? Object.keys(firstPlayer) : [];
+        // ── Parse standard players ──
+        const standardPlayers: any[] = standardRawData
+          ? (Array.isArray(standardRawData) ? standardRawData : (standardRawData?.data ?? []))
+          : [];
 
-        // Check for specific fields — no inference, no calculation
-        const fieldsOfInterest = [
-          "disposals",
+        // ── Validate team membership ──
+        const advancedTeamsFound = [...new Set(advancedPlayers.map((p: any) =>
+          normalizeTeam(p.teamId ?? p.teamName ?? "").toLowerCase()
+        ))];
+        const unexpectedTeams = advancedTeamsFound.filter(t => t && !expectedTeams.includes(t));
+
+        // ── Field names ──
+        const firstThreeAdvanced = advancedPlayers.slice(0, 3);
+        const advancedFieldNames: string[] = firstThreeAdvanced[0] ? Object.keys(firstThreeAdvanced[0]) : [];
+        const standardFieldNames: string[] = standardPlayers[0] ? Object.keys(standardPlayers[0]) : [];
+
+        // ── Field presence check (no inference, no calculation) ──
+        const advancedFieldsOfInterest = [
           "contestedPossessions",
           "uncontestedPossessions",
-          "totalPossessions",
-          // common snake_case variants
+          "effectiveDisposals",
+          "disposalEfficiencyPct",
+          "metresGained",
+          "intercepts",
+          "timeOnGroundPct",
+          // snake_case variants
           "contested_possessions",
           "uncontested_possessions",
-          "total_possessions",
+          "effective_disposals",
+          "disposal_efficiency_pct",
+          "metres_gained",
+          "time_on_ground_pct",
         ];
-        const fieldPresence: Record<string, boolean> = {};
-        for (const f of fieldsOfInterest) {
-          fieldPresence[f] = allFieldNames.includes(f);
+        const advancedFieldPresence: Record<string, boolean> = {};
+        for (const f of advancedFieldsOfInterest) {
+          advancedFieldPresence[f] = advancedFieldNames.includes(f);
         }
+
+        const standardFieldsOfInterest = ["disposals", "kicks", "handballs"];
+        const standardFieldPresence: Record<string, boolean> = {};
+        for (const f of standardFieldsOfInterest) {
+          standardFieldPresence[f] = standardFieldNames.includes(f);
+        }
+
+        // ── Join advanced + standard by playerId or normalised name+team ──
+        const joinedSample = firstThreeAdvanced.map((adv: any) => {
+          const advId = adv.playerId ?? adv.player_id;
+          const advName = normalizePlayerName(adv.playerName ?? adv.player_name ?? "");
+          const advTeam = normalizeTeam(adv.teamId ?? adv.teamName ?? "").toLowerCase();
+          const std = standardPlayers.find((s: any) => {
+            if (advId && (s.playerId ?? s.player_id)) return String(s.playerId ?? s.player_id) === String(advId);
+            return normalizePlayerName(s.playerName ?? s.player_name ?? "") === advName &&
+              normalizeTeam(s.teamId ?? s.teamName ?? "").toLowerCase() === advTeam;
+          }) ?? null;
+          return {
+            playerName: adv.playerName ?? adv.player_name,
+            teamId: adv.teamId ?? adv.teamName,
+            advanced_record: adv,
+            standard_disposals: std?.disposals ?? null,
+            join_method: advId && std ? "playerId" : std ? "name+team" : "no_match",
+          };
+        });
+
+        // ── Derived total if CP + UP exist ──
+        const cpKey = advancedFieldNames.find(f => f === "contestedPossessions" || f === "contested_possessions");
+        const upKey = advancedFieldNames.find(f => f === "uncontestedPossessions" || f === "uncontested_possessions");
+        const derivedTotalNote = cpKey && upKey
+          ? `Derived total_possessions = ${cpKey} + ${upKey} (app-calculated, not a Kali field)`
+          : "Cannot derive total_possessions — CP and/or UP not confirmed in live response";
 
         result.success = true;
         result.kali_connected = true;
         result.kali_status = "connected";
 
         const inspectPayload = {
-          endpoint_requested: lastEndpoint,
-          http_status: lastHttpStatus,
-          match_id_used: localMatchId,
-          kali_match_id: kaliMatchId,
-          match_label: `${match.home_team} vs ${match.away_team} — ${match.round} (${match.match_date})`,
-          top_level_response_keys: Object.keys(rawData),
-          total_player_records_returned: players.length,
-          first_player_record: firstPlayer,
-          all_field_names_from_first_player: allFieldNames,
-          field_presence: fieldPresence,
+          selected_match: {
+            local_match_id: localMatchId,
+            kali_match_id: kaliMatchId,
+            kali_match_id_resolution: kaliMatchResolutionMethod,
+            label: `${match.home_team} vs ${match.away_team} — ${match.round} (${match.match_date})`,
+            home_score: match.home_score,
+            away_score: match.away_score,
+            expected_teams: expectedTeams,
+          },
+          advanced_endpoint: {
+            url_called: advancedEndpointUrl,
+            http_status: advancedHttpStatus,
+            error_body: advancedErrorBody || null,
+            top_level_response_keys: advancedRawData ? Object.keys(advancedRawData) : [],
+            total_player_records_returned: advancedPlayers.length,
+            teams_found_in_response: advancedTeamsFound,
+            unexpected_teams: unexpectedTeams,
+            all_field_names: advancedFieldNames,
+            field_presence: advancedFieldPresence,
+            first_three_records: firstThreeAdvanced,
+          },
+          standard_endpoint: {
+            url_called: standardEndpointUrl,
+            http_status: standardHttpStatus,
+            error_body: standardErrorBody || null,
+            total_player_records_returned: standardPlayers.length,
+            all_field_names: standardFieldNames,
+            field_presence: standardFieldPresence,
+          },
+          row_count_match: advancedPlayers.length === standardPlayers.length,
+          advanced_row_count: advancedPlayers.length,
+          standard_row_count: standardPlayers.length,
+          joined_sample: joinedSample,
+          derived_total_possessions_note: derivedTotalNote,
         };
 
         return new Response(JSON.stringify({ ...result, inspect: inspectPayload }), {
@@ -706,6 +855,24 @@ Deno.serve(async (req: Request) => {
           requestsUsed++;
           result.requests_remaining = rateLimitRemaining;
 
+          // Fetch advanced stats in parallel — never block on failure
+          let advancedByName = new Map<string, any>();
+          try {
+            const { data: advData, rateLimitRemaining: advRem } = await kaliFetch(
+              `/player-stats-advanced?match_id=${kaliMatchId}&limit=200&offset=0`,
+              apiKey,
+            );
+            requestsUsed++;
+            result.requests_remaining = advRem;
+            const advRows: any[] = advData?.data ?? [];
+            for (const adv of advRows) {
+              const key = normalizePlayerName(adv.playerName ?? "") + "|" + normalizeTeam(adv.teamId ?? "").toLowerCase();
+              advancedByName.set(key, adv);
+            }
+          } catch (_advErr) {
+            // Advanced stats are best-effort; standard sync continues regardless
+          }
+
           const playerStats: KaliPlayerStat[] = statsData?.data ?? [];
 
           if (playerStats.length === 0) {
@@ -764,6 +931,21 @@ Deno.serve(async (req: Request) => {
               goals: ps.goals ?? 0,
               hitouts: ps.hitouts ?? 0,
               source: "kali_footywire_std",
+              // ── Advanced stats (from /player-stats-advanced) ──
+              ...(() => {
+                const advKey = normalizePlayerName(ps.playerName ?? "") + "|" + teamCanonical.toLowerCase();
+                const adv = advancedByName.get(advKey);
+                if (!adv) return {};
+                return {
+                  contested_possessions: adv.contestedPossessions ?? null,
+                  uncontested_possessions: adv.uncontestedPossessions ?? null,
+                  effective_disposals: adv.effectiveDisposals ?? null,
+                  disposal_efficiency_pct: adv.disposalEfficiencyPct ?? null,
+                  metres_gained: adv.metresGained ?? null,
+                  intercepts: adv.intercepts ?? null,
+                  time_on_ground_pct: adv.timeOnGroundPct ?? null,
+                };
+              })(),
             };
 
             if (playerId) {

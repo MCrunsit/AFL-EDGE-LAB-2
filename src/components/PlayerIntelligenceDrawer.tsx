@@ -1,5 +1,7 @@
 import { X, Check, AlertTriangle, TrendingUp, Info } from 'lucide-react';
+import { useState, useEffect } from 'react';
 import type { PlayerIntelligence } from '../lib/playerIntelligenceService';
+import { loadPossessionProfile } from '../lib/playerIntelligenceService';
 import type { PullEmLeg } from '../lib/pullEmMultiOptimizer';
 
 interface Props {
@@ -28,6 +30,14 @@ function unavailable(text = 'Insufficient data') {
 export default function PlayerIntelligenceDrawer({
   intel, lines, matchName, selectedKeys, legKeyFn, onToggleLeg, conflictMsg, onClose,
 }: Props) {
+  const [possProfile, setPossProfile] = useState<PlayerIntelligence['possessionProfile'] | null>(null);
+
+  useEffect(() => {
+    if (!intel?.playerId) return;
+    setPossProfile(null);
+    loadPossessionProfile(intel.playerId).then(setPossProfile);
+  }, [intel?.playerId]);
+
   if (!intel) return null;
   const sample = lines[0]?.row;
   const fr = sample?.freshness;
@@ -214,6 +224,56 @@ export default function PlayerIntelligenceDrawer({
               )}
             </div>
           </div>
+
+          {/* Possession Profile */}
+          {possProfile && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-white">Possession Profile</p>
+                {possProfile.available && (
+                  <span className="text-[10px] text-gray-500">{possProfile.reason}</span>
+                )}
+              </div>
+              {!possProfile.available ? (
+                <p className="text-[11px] text-gray-500">{possProfile.reason}</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">Avg Contested</span>
+                    <span className="text-cyan-400 font-semibold">{possProfile.avgCP ?? '—'}</span>
+                  </div>
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">Avg Uncontested</span>
+                    <span className="text-amber-400 font-semibold">{possProfile.avgUP ?? '—'}</span>
+                  </div>
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">Total Poss (CP+UP)</span>
+                    <span className="text-white font-semibold">{possProfile.avgTotalPossessions ?? '—'}</span>
+                  </div>
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">Avg Disposals</span>
+                    <span className="text-white">{possProfile.avgDisposals ?? '—'}</span>
+                  </div>
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">Metres Gained</span>
+                    <span className="text-white">{possProfile.avgMetresGained ?? '—'}</span>
+                  </div>
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">Intercepts</span>
+                    <span className="text-white">{possProfile.avgIntercepts ?? '—'}</span>
+                  </div>
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">TOG%</span>
+                    <span className="text-white">{possProfile.avgTOGPct != null ? `${possProfile.avgTOGPct}%` : '—'}</span>
+                  </div>
+                  <div className="bg-gray-800 rounded px-1.5 py-1.5">
+                    <span className="text-gray-500 block">Disposal Eff%</span>
+                    <span className="text-white">{possProfile.avgDisposalEffPct != null ? `${possProfile.avgDisposalEffPct}%` : '—'}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

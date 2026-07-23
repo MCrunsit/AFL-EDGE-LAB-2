@@ -1,22 +1,22 @@
 import { useState, useEffect } from 'react';
-import { Trophy, TrendingUp, TrendingDown, Minus, Loader2, AlertCircle } from 'lucide-react';
-import { loadTeamDisposalStats, type TeamDisposalStats, type TeamMatchupEnvironment, type TeamStatsDiagnostics, getLabelDisplay } from '../lib/teamStatsService';
-import { buildTeamEnvironmentMap } from '../lib/teamStatsService';
+import { Trophy, TrendingUp, TrendingDown, Minus, Loader2, AlertCircle, Zap } from 'lucide-react';
+import { loadTeamDisposalStats, type TeamDisposalStats, type TeamMatchupEnvironment, type TeamStatsDiagnostics, getLabelDisplay, buildTeamEnvironmentMap, loadTeamAdvancedStats, type TeamAdvancedStats } from '../lib/teamStatsService';
 import type { Match } from '../lib/types';
 import { supabase } from '../lib/supabase';
 
-type View = 'rankings' | 'matchups' | 'history';
+type View = 'rankings' | 'advanced' | 'matchups' | 'history';
 
 export default function TeamStatsPage() {
   const [view, setView] = useState<View>('rankings');
   const [stats, setStats] = useState<TeamDisposalStats[]>([]);
+  const [advancedStats, setAdvancedStats] = useState<TeamAdvancedStats[]>([]);
   const [teamDiag, setTeamDiag] = useState<TeamStatsDiagnostics | null>(null);
   const [matchups, setMatchups] = useState<TeamMatchupEnvironment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [upcomingMatches, setUpcomingMatches] = useState<Match[]>([]);
   const [historyMatches, setHistoryMatches] = useState<Match[]>([]);
-  const [selectedHistoryMatch, setSelectedHistoryMatch] = useState<string | null>(null);
+  const [advSortKey, setAdvSortKey] = useState<keyof TeamAdvancedStats>('avgCP');
 
   useEffect(() => {
     async function load() {
@@ -36,11 +36,15 @@ export default function TeamStatsPage() {
         setUpcomingMatches(upcoming);
         setHistoryMatches(completed);
 
-        const { stats: teamStats, matchups: teamMatchups } = await buildTeamEnvironmentMap(upcoming, 2026);
-        const { stats: rawStats, diagnostics: rawDiag } = await loadTeamDisposalStats(2026);
+        const [{ stats: teamStats, matchups: teamMatchups }, { stats: _rawStats, diagnostics: rawDiag }, advStats] = await Promise.all([
+          buildTeamEnvironmentMap(upcoming, 2026),
+          loadTeamDisposalStats(2026),
+          loadTeamAdvancedStats(2026),
+        ]);
         setTeamDiag(rawDiag);
         setStats(teamStats);
         setMatchups(teamMatchups);
+        setAdvancedStats(advStats);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -49,6 +53,12 @@ export default function TeamStatsPage() {
     }
     load();
   }, []);
+
+  const sortedAdv = [...advancedStats].sort((a, b) => {
+    const av = a[advSortKey] as number;
+    const bv = b[advSortKey] as number;
+    return bv - av;
+  });
 
   if (loading) {
     return (
@@ -78,20 +88,20 @@ export default function TeamStatsPage() {
           <Trophy className="w-5 h-5 text-emerald-400" />
           <div>
             <h2 className="text-white font-semibold text-sm">Team Stats</h2>
-            <p className="text-gray-500 text-xs">Team Disposal Environment · Complete matches only · Display Only mode</p>
+            <p className="text-gray-500 text-xs">Team Disposal &amp; Advanced Possession Environment · Complete matches only · Display Only mode</p>
           </div>
         </div>
       </div>
 
       {/* View tabs */}
-      <div className="flex gap-2">
-        {(['rankings', 'matchups', 'history'] as View[]).map(v => (
+      <div className="flex gap-2 flex-wrap">
+        {(['rankings', 'advanced', 'matchups', 'history'] as View[]).map(v => (
           <button
             key={v}
             onClick={() => setView(v)}
             className={`px-4 py-2 text-xs font-medium rounded-lg transition capitalize ${view === v ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
           >
-            {v === 'rankings' ? 'Team Rankings' : v === 'matchups' ? 'Upcoming Matchups' : 'Matchup History'}
+            {v === 'rankings' ? 'Team Rankings' : v === 'advanced' ? 'Advanced Stats' : v === 'matchups' ? 'Upcoming Matchups' : 'Matchup History'}
           </button>
         ))}
       </div>
@@ -159,6 +169,81 @@ export default function TeamStatsPage() {
                 </div>
               )}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Advanced Stats view */}
+      {view === 'advanced' && (
+        <div className="space-y-3">
+          {sortedAdv.length === 0 ? (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center">
+              <Zap className="w-8 h-8 text-gray-600 mx-auto mb-2" />
+              <p className="text-gray-500 text-sm">Advanced stats not yet available. Run a sync to populate contested possession data.</p>
+            </div>
+          ) : (
+            <>
+              {/* Sort controls */}
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className="text-gray-500 self-center">Sort by:</span>
+                {([
+                  ['avgCP', 'Contested Poss'],
+                  ['avgUP', 'Uncontested Poss'],
+                  ['avgMetresGained', 'Metres Gained'],
+                  ['avgIntercepts', 'Intercepts'],
+                  ['avgEffectiveDisposals', 'Eff. Disposals'],
+                  ['avgCPConceded', 'CP Conceded'],
+                ] as [keyof TeamAdvancedStats, string][]).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setAdvSortKey(key)}
+                    className={`px-3 py-1.5 rounded-lg transition ${advSortKey === key ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-gray-800 text-gray-500">
+                      <th className="text-left py-2.5 px-3 sticky left-0 bg-gray-900">Team</th>
+                      <th className="text-right py-2.5 px-3 text-cyan-400">Avg CP</th>
+                      <th className="text-right py-2.5 px-3 text-amber-400">Avg UP</th>
+                      <th className="text-right py-2.5 px-3">CP+UP</th>
+                      <th className="text-right py-2.5 px-3">Metres</th>
+                      <th className="text-right py-2.5 px-3">Intercepts</th>
+                      <th className="text-right py-2.5 px-3">Eff. Disp</th>
+                      <th className="text-right py-2.5 px-3">Disp Eff%</th>
+                      <th className="text-right py-2.5 px-3 text-red-400">CP Conceded</th>
+                      <th className="text-right py-2.5 px-3 text-red-400">UP Conceded</th>
+                      <th className="text-right py-2.5 px-3">Games</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedAdv.map((s, i) => (
+                      <tr key={s.team} className="border-b border-gray-800/30 hover:bg-gray-800/30">
+                        <td className="py-2 px-3 text-white font-medium sticky left-0 bg-gray-900">
+                          <span className="text-gray-600 mr-1.5">{i + 1}</span>{s.team}
+                        </td>
+                        <td className="py-2 px-3 text-right text-cyan-400 font-semibold">{s.avgCP}</td>
+                        <td className="py-2 px-3 text-right text-amber-400 font-semibold">{s.avgUP}</td>
+                        <td className="py-2 px-3 text-right text-gray-300">{s.avgCP + s.avgUP}</td>
+                        <td className="py-2 px-3 text-right text-gray-300">{s.avgMetresGained}</td>
+                        <td className="py-2 px-3 text-right text-gray-300">{s.avgIntercepts}</td>
+                        <td className="py-2 px-3 text-right text-gray-300">{s.avgEffectiveDisposals}</td>
+                        <td className="py-2 px-3 text-right text-gray-400">{s.avgDisposalEffPct}%</td>
+                        <td className="py-2 px-3 text-right text-red-400">{s.avgCPConceded > 0 ? s.avgCPConceded : '—'}</td>
+                        <td className="py-2 px-3 text-right text-red-400/70">{s.avgUPConceded > 0 ? s.avgUPConceded : '—'}</td>
+                        <td className="py-2 px-3 text-right text-gray-500">{s.seasonGames}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-gray-600 px-1">CP + UP = derived total possessions (app-calculated, not a Kali field). Averages are per team per completed match with ≥10 player records.</p>
+            </>
           )}
         </div>
       )}

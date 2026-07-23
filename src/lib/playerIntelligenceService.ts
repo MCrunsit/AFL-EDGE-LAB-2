@@ -19,6 +19,48 @@ import type { RoleTrendMap, RoleTrendEntry } from './roleTrendService';
 import type { PositionEdgeCache, PositionEdgeResult, ConfidenceLevel } from './positionEdge';
 import { getPositionEdge, normalizeOpponentName, loadPositionEdgeCache } from './positionEdge';
 import { normalizeTeam } from './teamNormalizer';
+import { supabase } from './supabase';
+
+export async function loadPossessionProfile(playerId: string, season = 2026): Promise<PlayerIntelligence['possessionProfile']> {
+  const { data: rows, error } = await supabase
+    .from('player_game_stats')
+    .select('contested_possessions, uncontested_possessions, total_possessions, disposals, metres_gained, intercepts, time_on_ground_pct, disposal_efficiency_pct, round')
+    .eq('player_id', playerId)
+    .eq('season', season)
+    .not('contested_possessions', 'is', null)
+    .order('round', { ascending: false })
+    .limit(20);
+
+  if (error || !rows || rows.length === 0) {
+    return {
+      available: false,
+      avgCP: null, avgUP: null, avgTotalPossessions: null, avgDisposals: null,
+      avgMetresGained: null, avgIntercepts: null, avgTOGPct: null, avgDisposalEffPct: null,
+      sampleSize: 0,
+      reason: rows && rows.length === 0 ? 'No advanced stats available for this player this season' : 'Failed to load possession data',
+    };
+  }
+
+  const avg = (arr: (number | null)[]) => {
+    const valid = arr.filter(v => v !== null) as number[];
+    return valid.length > 0 ? Math.round((valid.reduce((a, b) => a + b, 0) / valid.length) * 10) / 10 : null;
+  };
+
+  const n = rows.length;
+  return {
+    available: true,
+    avgCP: avg(rows.map(r => r.contested_possessions)),
+    avgUP: avg(rows.map(r => r.uncontested_possessions)),
+    avgTotalPossessions: avg(rows.map(r => r.total_possessions)),
+    avgDisposals: avg(rows.map(r => r.disposals)),
+    avgMetresGained: avg(rows.map(r => r.metres_gained)),
+    avgIntercepts: avg(rows.map(r => r.intercepts)),
+    avgTOGPct: avg(rows.map(r => r.time_on_ground_pct)),
+    avgDisposalEffPct: avg(rows.map(r => r.disposal_efficiency_pct)),
+    sampleSize: n,
+    reason: `Based on ${n} game${n !== 1 ? 's' : ''} in 2026 with advanced data`,
+  };
+}
 
 export type PositionEdgeLabelType =
   | 'VERY_POSITIVE' | 'POSITIVE' | 'NEUTRAL' | 'NEGATIVE' | 'VERY_NEGATIVE' | 'INSUFFICIENT_DATA';
@@ -103,6 +145,20 @@ export interface PlayerIntelligence {
   intelligenceLabel: IntelligenceLabel;
 
   dataConfidence: number | null;
+
+  possessionProfile: {
+    available: boolean;
+    avgCP: number | null;
+    avgUP: number | null;
+    avgTotalPossessions: number | null;
+    avgDisposals: number | null;
+    avgMetresGained: number | null;
+    avgIntercepts: number | null;
+    avgTOGPct: number | null;
+    avgDisposalEffPct: number | null;
+    sampleSize: number;
+    reason: string;
+  };
 }
 
 // ── Shared Position Edge cache — loaded once, independent of the "Use Position
@@ -471,5 +527,12 @@ export function computePlayerIntelligence(input: PlayerIntelligenceInput): Playe
     risks: risks.slice(0, 3),
     missingData,
     intelligenceScore, intelligenceLabel, dataConfidence,
+    possessionProfile: {
+      available: false,
+      avgCP: null, avgUP: null, avgTotalPossessions: null, avgDisposals: null,
+      avgMetresGained: null, avgIntercepts: null, avgTOGPct: null, avgDisposalEffPct: null,
+      sampleSize: 0,
+      reason: 'Not yet loaded',
+    },
   };
 }
