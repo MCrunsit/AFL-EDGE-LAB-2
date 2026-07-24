@@ -1710,6 +1710,7 @@ export default function MultiBuilderPage() {
                 className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-cyan-500"
               >
                 <option value="auto">Auto / Next Betting Round</option>
+                <option value="20">Round 20</option>
                 <option value="19">Round 19</option>
                 <option value="18">Round 18</option>
                 <option value="17">Round 17</option>

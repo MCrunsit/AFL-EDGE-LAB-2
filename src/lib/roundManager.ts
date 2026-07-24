@@ -20,22 +20,52 @@ function parseRoundNum(round: string | null): number {
 }
 
 /**
- * Detect the latest completed stats round from player_game_stats.
- * This is the round modelled stats are available through.
+ * Detect the latest FULLY completed round — every match in the round must
+ * have a match_date in the past, not just one. A single Thursday-night game
+ * finishing (and its stats syncing) does not mean the whole round is done;
+ * treating it as "completed" makes nextBettingRound skip straight past the
+ * round that's still actually in progress (e.g. computing round 21 as next
+ * when round 20 has only played one of nine games), which is why the Multi
+ * Builder's "Auto / Next Betting Round" can silently resolve to zero matches.
  */
 export async function getLatestCompletedStatsRound(season = 2026): Promise<{ round: string | null; roundNum: number; matchDate: string | null }> {
+  const today = new Date().toISOString().split('T')[0];
   const { data } = await supabase
-    .from('player_game_stats')
-    .select('match_date, match_id, matches:match_id(round)')
-    .order('match_date', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .from('matches')
+    .select('round, match_date')
+    .eq('season', season)
+    .neq('round', '0');
 
-  if (data) {
-    const round = (data as any)?.matches?.round ?? null;
-    return { round, roundNum: parseRoundNum(round), matchDate: data.match_date };
+  if (!data) return { round: null, roundNum: 0, matchDate: null };
+
+  const byRound = new Map<number, { maxDate: string; hasNullDate: boolean }>();
+  for (const row of data) {
+    const n = parseRoundNum(row.round);
+    if (!n) continue;
+    const entry = byRound.get(n) ?? { maxDate: '', hasNullDate: false };
+    if (!row.match_date) {
+      entry.hasNullDate = true;
+    } else if (row.match_date > entry.maxDate) {
+      entry.maxDate = row.match_date;
+    }
+    byRound.set(n, entry);
   }
-  return { round: null, roundNum: 0, matchDate: null };
+
+  let bestRound: number | null = null;
+  let bestDate = '';
+  for (const [round, entry] of byRound) {
+    if (entry.hasNullDate || !entry.maxDate) continue;
+    if (entry.maxDate < today && (bestRound === null || round > bestRound)) {
+      bestRound = round;
+      bestDate = entry.maxDate;
+    }
+  }
+
+  return {
+    round: bestRound !== null ? String(bestRound) : null,
+    roundNum: bestRound ?? 0,
+    matchDate: bestRound !== null ? bestDate : null,
+  };
 }
 
 /**
@@ -67,13 +97,9 @@ export async function getLatestCompletedMatchRound(season = 2026): Promise<{ rou
  */
 export async function getRoundInfo(season = 2026): Promise<RoundInfo> {
   const { round: statsRound, roundNum: statsRoundNum } = await getLatestCompletedStatsRound(season);
-  const computedNextRoundNum = statsRoundNum > 0 ? statsRoundNum + 1 : 0;
-  const computedNextRound = computedNextRoundNum > 0 ? String(computedNextRoundNum) : null;
+  const nextBettingRoundNum = statsRoundNum > 0 ? statsRoundNum + 1 : 0;
+  const nextBettingRound = nextBettingRoundNum > 0 ? String(nextBettingRoundNum) : null;
 
-  const today = new Date().toISOString().split('T')[0];
-
-  let nextBettingRound = computedNextRound;
-  let nextBettingRoundNum = computedNextRoundNum;
   let nextRoundFixtures: Match[] = [];
   let nextRoundOddsCount = 0;
 
@@ -98,63 +124,19 @@ export async function getRoundInfo(season = 2026): Promise<RoundInfo> {
     }
   }
 
-  // Fallback: if the computed next round has no future fixtures (e.g. it
-  // doesn't exist yet, or all its matches already played), scan nearby rounds
-  // for the nearest one that still has upcoming fixtures. This keeps the
-  // Multi Builder dropdown populated with the genuine current betting round
-  // instead of going empty when stats sync runs slightly ahead of fixture
-  // availability for the round after next.
-  const hasFutureFixture = nextRoundFixtures.some(m => {
-    const when = (m.commence_time_utc ?? m.match_date ?? '').split('T')[0];
-    return when >= today;
-  });
-
-  if (!hasFutureFixture) {
-    // Search rounds from the stats round forward (up to +3) for one with
-    // future fixtures.  This catches the common case where the latest stats
-    // round IS the current betting round — some matches in it have already
-    // been played (stats exist) but others in the same round are still upcoming.
-    for (let r = statsRoundNum; r <= statsRoundNum + 3; r++) {
-      if (r === computedNextRoundNum) continue; // already checked
-      const roundStr = String(r);
-      const { data: fallbackFixtures } = await supabase
-        .from('matches')
-        .select('*')
-        .eq('season', season)
-        .eq('round', roundStr)
-        .order('commence_time_utc', { ascending: true, nullsFirst: false });
-      const fbFixtures = (fallbackFixtures ?? []) as Match[];
-      const fbHasFuture = fbFixtures.some(m => {
-        const when = (m.commence_time_utc ?? m.match_date ?? '').split('T')[0];
-        return when >= today;
-      });
-      if (fbHasFuture) {
-        nextBettingRound = roundStr;
-        nextBettingRoundNum = r;
-        nextRoundFixtures = fbFixtures;
-        const matchIds = fbFixtures.map(m => m.id);
-        const { count: fbCount } = await supabase
-          .from('bookmaker_odds')
-          .select('id', { count: 'exact', head: true })
-          .in('match_id', matchIds);
-        nextRoundOddsCount = fbCount ?? 0;
-        break;
-      }
-    }
-  }
-
   // A round is only "ready" if it actually lies in the future. The next
   // betting round is derived as (latest completed stats round + 1), but when
   // stats sync lags behind real life that computed round can already have been
   // played — its fixtures exist in the DB with past dates. Without this guard
   // the status panel reports a finished round as "Ready" while Match Hub (which
   // filters on match_date >= today) correctly shows no upcoming fixtures.
-  const finalHasFuture = nextRoundFixtures.some(m => {
+  const today = new Date().toISOString().split('T')[0];
+  const hasFutureFixture = nextRoundFixtures.some(m => {
     const when = (m.commence_time_utc ?? m.match_date ?? '').split('T')[0];
     return when >= today;
   });
 
-  const fixturesReady = nextRoundFixtures.length > 0 && finalHasFuture;
+  const fixturesReady = nextRoundFixtures.length > 0 && hasFutureFixture;
   const oddsReady = fixturesReady && nextRoundOddsCount > 0;
   const readyForMultiBuilder = fixturesReady && oddsReady;
 
