@@ -23,7 +23,8 @@ import {
   computePlayerIntelligence, getSharedPositionEdgeCache, type PlayerIntelligence,
 } from '../lib/playerIntelligenceService';
 import {
-  evaluateRecommendationObjective, OBJECTIVE_LABELS, type RecommendationObjective, type ObjectiveEvaluation,
+  evaluateRecommendationObjective, OBJECTIVE_LABELS, DEFAULT_OBJECTIVE_THRESHOLDS,
+  type RecommendationObjective, type ObjectiveEvaluation, type ObjectiveThresholds,
 } from '../lib/recommendationObjective';
 import PlayerIntelligenceDrawer from './PlayerIntelligenceDrawer';
 
@@ -298,7 +299,22 @@ export default function MultiOptimizerPanel({
   // gated by this — it reads the unrestricted pickableLegs pool and only shows a
   // warning when a line fails the selected objective.
   const [recommendationObjective, setRecommendationObjective] = useState<RecommendationObjective>('safest');
-  const [manualPickerMode, setManualPickerMode] = useState<'all' | 'recommendedOnly'>('all');
+  const [manualPickerMode, setManualPickerMode] = useState<'all' | 'recommendedOnly'>('recommendedOnly');
+  // User-adjustable thresholds per objective — starts at the same values as
+  // DEFAULT_OBJECTIVE_THRESHOLDS, but editable live from the "Tune thresholds"
+  // panel so the risk bar can be loosened/tightened without a code change.
+  const [objectiveThresholds, setObjectiveThresholds] = useState<Record<RecommendationObjective, ObjectiveThresholds>>(() => ({
+    safest: { ...DEFAULT_OBJECTIVE_THRESHOLDS.safest },
+    balanced: { ...DEFAULT_OBJECTIVE_THRESHOLDS.balanced },
+    bestValue: { ...DEFAULT_OBJECTIVE_THRESHOLDS.bestValue },
+  }));
+  const [showThresholdTuner, setShowThresholdTuner] = useState(false);
+  function updateThreshold<K extends keyof ObjectiveThresholds>(objective: RecommendationObjective, key: K, value: ObjectiveThresholds[K]) {
+    setObjectiveThresholds(prev => ({ ...prev, [objective]: { ...prev[objective], [key]: value } }));
+  }
+  function resetThresholds(objective: RecommendationObjective) {
+    setObjectiveThresholds(prev => ({ ...prev, [objective]: { ...DEFAULT_OBJECTIVE_THRESHOLDS[objective] } }));
+  }
   const [drawerPlayerId, setDrawerPlayerId] = useState<string | null>(null);
 
   // Load saved exclusions when the selected match changes
@@ -438,10 +454,10 @@ export default function MultiOptimizerPanel({
       if (!row) continue;
       const playerId = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
       if (!playerId || map.has(playerId)) continue;
-      map.set(playerId, evaluateRecommendationObjective(recommendationObjective, row, intelligenceByPlayer.get(playerId)));
+      map.set(playerId, evaluateRecommendationObjective(recommendationObjective, row, intelligenceByPlayer.get(playerId), objectiveThresholds[recommendationObjective]));
     }
     return map;
-  }, [gameRecommendations, intelligenceByPlayer, recommendationObjective]);
+  }, [gameRecommendations, intelligenceByPlayer, recommendationObjective, objectiveThresholds]);
 
   // Intelligence filters applied on top of the shared eligible pool. Every
   // downstream consumer below (Best Individual Legs, Suggested Multis via
@@ -527,9 +543,9 @@ export default function MultiOptimizerPanel({
       if (intel.roleIntelligence.label !== 'ROLE_BOOST' && intel.roleIntelligence.label !== 'SLIGHT_BOOST') noPositiveRoleSignals++;
       if (!row.freshness || row.freshness.freshnessStatus !== 'CURRENT') staleOrUnverifiedFreshness++;
 
-      if (evaluateRecommendationObjective('safest', row, intel).eligible) safestEligible++;
-      if (evaluateRecommendationObjective('balanced', row, intel).eligible) balancedEligible++;
-      if (evaluateRecommendationObjective('bestValue', row, intel).eligible) bestValueEligible++;
+      if (evaluateRecommendationObjective('safest', row, intel, objectiveThresholds.safest).eligible) safestEligible++;
+      if (evaluateRecommendationObjective('balanced', row, intel, objectiveThresholds.balanced).eligible) balancedEligible++;
+      if (evaluateRecommendationObjective('bestValue', row, intel, objectiveThresholds.bestValue).eligible) bestValueEligible++;
 
       if (c.matchupEnabled && !c.matchupPositive) excludedByMatchup++;
       if (c.environmentEnabled && !c.environmentPositive) excludedByEnvironment++;
@@ -552,7 +568,7 @@ export default function MultiOptimizerPanel({
       safestEligible, balancedEligible, bestValueEligible,
       finalCandidateLines: eligibleLegs - (intelligenceApplicationMode === 'RANK_ONLY' ? 0 : removedByApplicationMode),
     };
-  }, [gameRecommendations, intelligenceByPlayer, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData, intelligenceApplicationMode, intelligenceFilterActive]);
+  }, [gameRecommendations, intelligenceByPlayer, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData, intelligenceApplicationMode, intelligenceFilterActive, objectiveThresholds]);
 
   const gameRecommendationsFiltered = useMemo(() => {
     // Rank Only: never remove a leg for missing/negative intelligence — signals
@@ -799,8 +815,8 @@ export default function MultiOptimizerPanel({
   // but applied to THIS specific line's own row (not just the player's best
   // line), since Build Your Own shows every genuine line per player.
   const altLineEval = useCallback((leg: PullEmLeg): ObjectiveEvaluation => {
-    return evaluateRecommendationObjective(recommendationObjective, leg.row, intelligenceByPlayer.get(leg.playerId));
-  }, [recommendationObjective, intelligenceByPlayer]);
+    return evaluateRecommendationObjective(recommendationObjective, leg.row, intelligenceByPlayer.get(leg.playerId), objectiveThresholds[recommendationObjective]);
+  }, [recommendationObjective, intelligenceByPlayer, objectiveThresholds]);
 
   const altLinesFiltered = useMemo(() => {
     let rows = pickableLegs;
@@ -1376,6 +1392,12 @@ export default function MultiOptimizerPanel({
                   {OBJECTIVE_LABELS[obj]}
                 </button>
               ))}
+              <button
+                onClick={() => setShowThresholdTuner(v => !v)}
+                className="text-[10px] px-2 py-1 rounded font-medium bg-gray-800 text-gray-400 border border-gray-700 hover:border-gray-600 transition"
+              >
+                {showThresholdTuner ? 'Hide' : 'Tune'} thresholds
+              </button>
             </div>
             <div className="flex items-center gap-2">
               <label className="text-[10px] text-gray-500 uppercase">Candidate Pool</label>
@@ -1397,6 +1419,87 @@ export default function MultiOptimizerPanel({
           </div>
           {recommendationObjective === 'bestValue' && (
             <p className="text-[10px] text-amber-400 mb-2">Value focused — not the highest-probability multi.</p>
+          )}
+          {showThresholdTuner && (
+            <div className="mb-3 bg-gray-800/60 border border-gray-700 rounded-lg p-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-white">Tune {OBJECTIVE_LABELS[recommendationObjective]} thresholds</span>
+                <button onClick={() => resetThresholds(recommendationObjective)} className="text-[10px] text-gray-400 hover:text-cyan-400 underline">Reset to default</button>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-[10px]">
+                <div>
+                  <label className="text-gray-500 uppercase block mb-1">Min Adjusted Prob: {Math.round(objectiveThresholds[recommendationObjective].minAdjustedProb * 100)}%</label>
+                  <input type="range" min="0" max="95" step="1"
+                    value={Math.round(objectiveThresholds[recommendationObjective].minAdjustedProb * 100)}
+                    onChange={e => updateThreshold(recommendationObjective, 'minAdjustedProb', Number(e.target.value) / 100)}
+                    className="w-full accent-cyan-500" />
+                </div>
+                <div>
+                  <label className="text-gray-500 uppercase block mb-1">Min Season Hit Rate: {objectiveThresholds[recommendationObjective].minHitRate === 0 ? 'Off' : `${Math.round(objectiveThresholds[recommendationObjective].minHitRate * 100)}%`}</label>
+                  <input type="range" min="0" max="95" step="1"
+                    value={Math.round(objectiveThresholds[recommendationObjective].minHitRate * 100)}
+                    onChange={e => updateThreshold(recommendationObjective, 'minHitRate', Number(e.target.value) / 100)}
+                    className="w-full accent-cyan-500" />
+                </div>
+                <div>
+                  <label className="text-gray-500 uppercase block mb-1">Min Sample Size: {objectiveThresholds[recommendationObjective].minSampleSize}</label>
+                  <input type="range" min="0" max="20" step="1"
+                    value={objectiveThresholds[recommendationObjective].minSampleSize}
+                    onChange={e => updateThreshold(recommendationObjective, 'minSampleSize', Number(e.target.value))}
+                    className="w-full accent-cyan-500" />
+                </div>
+                <div>
+                  <label className="text-gray-500 uppercase block mb-1">Min Last 10: {objectiveThresholds[recommendationObjective].minLast10Hits === 0 ? 'Off' : `${objectiveThresholds[recommendationObjective].minLast10Hits}/10`}</label>
+                  <input type="range" min="0" max="10" step="1"
+                    value={objectiveThresholds[recommendationObjective].minLast10Hits}
+                    onChange={e => updateThreshold(recommendationObjective, 'minLast10Hits', Number(e.target.value))}
+                    className="w-full accent-cyan-500" />
+                </div>
+                <div>
+                  <label className="text-gray-500 uppercase block mb-1">Min Last 5: {objectiveThresholds[recommendationObjective].minLast5Hits === 0 ? 'Off' : `${objectiveThresholds[recommendationObjective].minLast5Hits}/5`}</label>
+                  <input type="range" min="0" max="5" step="1"
+                    value={objectiveThresholds[recommendationObjective].minLast5Hits}
+                    onChange={e => updateThreshold(recommendationObjective, 'minLast5Hits', Number(e.target.value))}
+                    className="w-full accent-cyan-500" />
+                </div>
+                <div>
+                  <label className="text-gray-500 uppercase block mb-1">Min Intelligence Score: {objectiveThresholds[recommendationObjective].minIntelligenceScore === 0 ? 'Off' : objectiveThresholds[recommendationObjective].minIntelligenceScore}</label>
+                  <input type="range" min="0" max="90" step="1"
+                    value={objectiveThresholds[recommendationObjective].minIntelligenceScore}
+                    onChange={e => updateThreshold(recommendationObjective, 'minIntelligenceScore', Number(e.target.value))}
+                    className="w-full accent-cyan-500" />
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3 mt-3">
+                <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                  <select value={objectiveThresholds[recommendationObjective].allowedRisk}
+                    onChange={e => updateThreshold(recommendationObjective, 'allowedRisk', e.target.value as ObjectiveThresholds['allowedRisk'])}
+                    className="bg-gray-800 border border-gray-700 text-white text-[10px] rounded px-1.5 py-1">
+                    <option value="low">Low risk only</option>
+                    <option value="lowMedium">Low/Medium risk</option>
+                    <option value="any">Any risk</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                  <input type="checkbox" checked={objectiveThresholds[recommendationObjective].excludeVeryNegativeEnv}
+                    onChange={e => updateThreshold(recommendationObjective, 'excludeVeryNegativeEnv', e.target.checked)}
+                    className="accent-red-500" />
+                  Exclude Very Negative Environment
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                  <input type="checkbox" checked={objectiveThresholds[recommendationObjective].excludeNegativePosition}
+                    onChange={e => updateThreshold(recommendationObjective, 'excludeNegativePosition', e.target.checked)}
+                    className="accent-red-500" />
+                  Exclude Negative Position Edge
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+                  <input type="checkbox" checked={objectiveThresholds[recommendationObjective].excludeRoleReduction}
+                    onChange={e => updateThreshold(recommendationObjective, 'excludeRoleReduction', e.target.checked)}
+                    className="accent-red-500" />
+                  Exclude Falling Role
+                </label>
+              </div>
+            </div>
           )}
           <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
             <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Genuine Lines</p><p className="text-white font-bold">{allLinesResult?.legs.length ?? 0}</p></div>
