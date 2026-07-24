@@ -22,6 +22,9 @@ import type { TeamFullStats } from '../lib/teamMatchAggregation';
 import {
   computePlayerIntelligence, getSharedPositionEdgeCache, type PlayerIntelligence,
 } from '../lib/playerIntelligenceService';
+import {
+  evaluateRecommendationObjective, OBJECTIVE_LABELS, type RecommendationObjective, type ObjectiveEvaluation,
+} from '../lib/recommendationObjective';
 import PlayerIntelligenceDrawer from './PlayerIntelligenceDrawer';
 
 const ALL_LINES_SETTINGS: PullEmSettings = {
@@ -287,6 +290,15 @@ export default function MultiOptimizerPanel({
   // Require Any Positive: a leg passes if at least one enabled category is positive.
   // Require All Positive: a leg must pass every enabled category (previous, strict-AND behavior).
   const [intelligenceApplicationMode, setIntelligenceApplicationMode] = useState<'RANK_ONLY' | 'REQUIRE_ANY' | 'REQUIRE_ALL'>('RANK_ONLY');
+
+  // Recommendation objective — the primary, always-on gate for every automatic
+  // recommendation surface (Best Individual Legs, Top Recommended Legs, Recommended
+  // Multis). Safest excludes Very Negative environment/matchup, falling roles, weak
+  // intelligence, and low-probability legs by default. Build Your Own Multi is never
+  // gated by this — it reads the unrestricted pickableLegs pool and only shows a
+  // warning when a line fails the selected objective.
+  const [recommendationObjective, setRecommendationObjective] = useState<RecommendationObjective>('safest');
+  const [manualPickerMode, setManualPickerMode] = useState<'all' | 'recommendedOnly'>('all');
   const [drawerPlayerId, setDrawerPlayerId] = useState<string | null>(null);
 
   // Load saved exclusions when the selected match changes
@@ -412,6 +424,25 @@ export default function MultiOptimizerPanel({
     return map;
   }, [gameRecommendations, positionEdgeCache, teamEnvMap, teamStats, roleTrends, possessionProfiles, positionPossessionAverages, teamFullStats]);
 
+  // Canonical recommendation-objective evaluation — one evaluation per player,
+  // reusing the SAME row (bestOddsLine ?? safeLine ?? balancedLine ?? valueLine)
+  // and the SAME PlayerIntelligence already computed above. This is the single
+  // source of truth for "is this leg eligible for the selected objective" —
+  // Best Individual Legs, diagnostics, Recommended Multis (handleBuild), and
+  // Build Your Own Multi's "Recommended Lines Only" filter all read this map
+  // instead of recomputing eligibility independently.
+  const objectiveEvalByPlayer = useMemo(() => {
+    const map = new Map<string, ObjectiveEvaluation>();
+    for (const rec of gameRecommendations) {
+      const row = rec.bestOddsLine ?? rec.safeLine ?? rec.balancedLine ?? rec.valueLine;
+      if (!row) continue;
+      const playerId = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
+      if (!playerId || map.has(playerId)) continue;
+      map.set(playerId, evaluateRecommendationObjective(recommendationObjective, row, intelligenceByPlayer.get(playerId)));
+    }
+    return map;
+  }, [gameRecommendations, intelligenceByPlayer, recommendationObjective]);
+
   // Intelligence filters applied on top of the shared eligible pool. Every
   // downstream consumer below (Best Individual Legs, Suggested Multis via
   // handleBuild, eligiblePlayerIds -> alternate-line builder -> Complete My
@@ -455,8 +486,24 @@ export default function MultiOptimizerPanel({
     let uniqueCandidatePlayers = 0;
     const seenPlayers = new Set<string>();
 
+    // Unconditional signal counts — these reflect what is genuinely visible in
+    // the candidate rows regardless of whether the opt-in checkbox filters
+    // below are enabled. The excludedBy* counters above only count exclusions
+    // actually applied by an enabled checkbox; they must never be read as "how
+    // many negative signals exist" (that was the root cause of diagnostics
+    // showing 0 negative signals while Very Negative rows were plainly visible).
+    let veryNegativeEnvironmentSignals = 0;
+    let negativePositionSignals = 0;
+    let roleReductionSignals = 0;
+    let slightReductionSignals = 0;
+    let noPositiveRoleSignals = 0;
+    let safestEligible = 0;
+    let balancedEligible = 0;
+    let bestValueEligible = 0;
+    let staleOrUnverifiedFreshness = 0;
+
     for (const rec of gameRecommendations) {
-      const row = rec.safeLine;
+      const row = rec.bestOddsLine ?? rec.safeLine ?? rec.balancedLine ?? rec.valueLine;
       if (!row) continue;
       const pid = row.player_id ?? row.resolvedPlayerId ?? rec.playerId;
       const intel = intelligenceByPlayer.get(pid);
@@ -472,6 +519,17 @@ export default function MultiOptimizerPanel({
       if (intel.intelligenceScore !== null) withScore++;
       const c = categoryChecks(intel);
       if (!c.sufficientData) missingSufficientData++;
+
+      if (intel.teamEnvironment.label === 'LOW') veryNegativeEnvironmentSignals++;
+      if (intel.positionEdge.label === 'NEGATIVE' || intel.positionEdge.label === 'VERY_NEGATIVE') negativePositionSignals++;
+      if (intel.roleIntelligence.label === 'ROLE_REDUCTION') roleReductionSignals++;
+      if (intel.roleIntelligence.label === 'SLIGHT_REDUCTION') slightReductionSignals++;
+      if (intel.roleIntelligence.label !== 'ROLE_BOOST' && intel.roleIntelligence.label !== 'SLIGHT_BOOST') noPositiveRoleSignals++;
+      if (!row.freshness || row.freshness.freshnessStatus !== 'CURRENT') staleOrUnverifiedFreshness++;
+
+      if (evaluateRecommendationObjective('safest', row, intel).eligible) safestEligible++;
+      if (evaluateRecommendationObjective('balanced', row, intel).eligible) balancedEligible++;
+      if (evaluateRecommendationObjective('bestValue', row, intel).eligible) bestValueEligible++;
 
       if (c.matchupEnabled && !c.matchupPositive) excludedByMatchup++;
       if (c.environmentEnabled && !c.environmentPositive) excludedByEnvironment++;
@@ -489,6 +547,9 @@ export default function MultiOptimizerPanel({
       withPositionEdge, withTeamEnvironment, withRoleIntelligence, withCba, withKickIns, withScore,
       missingSufficientData, excludedByMatchup, excludedByEnvironment, excludedByRole, excludedByDataRequirement,
       removedByApplicationMode,
+      veryNegativeEnvironmentSignals, negativePositionSignals, roleReductionSignals, slightReductionSignals,
+      noPositiveRoleSignals, staleOrUnverifiedFreshness,
+      safestEligible, balancedEligible, bestValueEligible,
       finalCandidateLines: eligibleLegs - (intelligenceApplicationMode === 'RANK_ONLY' ? 0 : removedByApplicationMode),
     };
   }, [gameRecommendations, intelligenceByPlayer, filterPositiveMatchup, filterPositiveEnvironment, filterRoleBoost, filterExcludeNegativeMatchup, filterSufficientIntelData, intelligenceApplicationMode, intelligenceFilterActive]);
@@ -592,12 +653,16 @@ export default function MultiOptimizerPanel({
     setProgress({ phase: 'preparing', safePlayerLines: 0, combinationsChecked: 0, candidatesFound: 0 });
 
     try {
-      // Exclude stale/uncertain players from automatic multis
+      // Exclude stale/uncertain players AND legs that fail the selected
+      // recommendation objective from automatic multis — Recommended Multis
+      // must never contain a leg the Top Recommended Legs list itself rejected.
       const freshRecommendations = gameRecommendationsFiltered.filter(rec => {
         const sourceLine = settings.preset === 'sameGame' ? (rec.bestOddsLine ?? rec.balancedLine ?? rec.safeLine) : rec.safeLine;
         if (!sourceLine) return false;
         const fr = sourceLine.freshness;
-        return fr && fr.freshnessStatus === 'CURRENT';
+        if (!fr || fr.freshnessStatus !== 'CURRENT') return false;
+        const pid = sourceLine.player_id ?? sourceLine.resolvedPlayerId ?? rec.playerId;
+        return Boolean(pid && objectiveEvalByPlayer.get(pid)?.eligible);
       });
       const result = await runMultiOptimizerAsync(
         freshRecommendations,
@@ -622,40 +687,44 @@ export default function MultiOptimizerPanel({
     cancelRef.current.cancelled = true;
   }
 
-  const safeLineCount = gameRecommendationsFiltered.filter(r => r.safeLine).length;
+  // Objective-eligible count — how many players pass the selected recommendation
+  // objective's gates (probability, freshness, risk, environment, position,
+  // role, intelligence). Replaces the old raw-safeLine-only count, which
+  // disagreed with what "Best Individual Legs" actually displayed.
+  const objectiveEligibleCount = gameRecommendationsFiltered.filter(r => {
+    const row = r.bestOddsLine ?? r.safeLine ?? r.balancedLine ?? r.valueLine;
+    const pid = row?.player_id ?? row?.resolvedPlayerId ?? r.playerId;
+    return pid ? objectiveEvalByPlayer.get(pid)?.eligible : false;
+  }).length;
 
-  // Candidate Pool — how many unique players the "Best Individual Legs" list
-  // (and, via eligiblePlayerIds above, everything downstream that reads it)
-  // shows. "Recommended" is the previous safeLine-only behavior; the numeric
-  // options and "All" draw from every player with ANY valid line, ranked by
-  // best-available adjusted probability. Build Your Own Multi is never
-  // restricted by this — it already reads the full eligiblePlayerIds set.
-  // Default to "All Valid Players" — the model may still rank/recommend, but
-  // it must not silently hide valid players with genuine bookmaker odds.
+  // Candidate Pool — how many of the objective-eligible players "Best Individual
+  // Legs" shows, ranked by objective score (conservative probability for
+  // Safest/Balanced, EV for Best Value). This list is part of the strict,
+  // model-assisted recommendation experience — a leg must pass the selected
+  // recommendation objective to appear here at all. Build Your Own Multi is
+  // never restricted by this; it reads the full, unrestricted pickableLegs pool.
   const [candidatePoolSize, setCandidatePoolSize] = useState<'recommended' | 10 | 15 | 20 | 'all'>('all');
 
-  // "Best Individual Disposal Legs" is a recommendation list, not the full
-  // valid-player pool — every line shown here must stay within a genuinely
-  // safe individual-leg price, matching what actually feeds automatic multis
-  // (which only ever use safeLine). Expanding the Candidate Pool controls how
-  // MANY safe players are shown, never whether a risky line sneaks in — that
-  // was a real bug: balancedLine/valueLine fallback had no odds ceiling,
-  // so Top 10/15/20/All could surface individual legs above $2.00+. Build
-  // Your Own Multi is intentionally unrestricted (shows every genuine line);
-  // this cap applies only to the recommended list.
-  const MAX_RECOMMENDED_LEG_ODDS = 1.40;
   const candidateLegs = useMemo(() => {
-    if (candidatePoolSize === 'recommended') {
-      return gameRecommendationsFiltered.filter(r => r.safeLine);
-    }
-    const withBestLine = gameRecommendationsFiltered
+    const eligible = gameRecommendationsFiltered
       .map(r => ({ rec: r, line: r.bestOddsLine ?? r.safeLine ?? r.balancedLine ?? r.valueLine }))
-      .filter((x): x is { rec: typeof x.rec; line: NonNullable<typeof x.line> } =>
-        x.line != null && x.line.over_odds <= MAX_RECOMMENDED_LEG_ODDS)
-      .sort((a, b) => (b.line.adjustedProb ?? b.line.finalProbability ?? 0) - (a.line.adjustedProb ?? a.line.finalProbability ?? 0));
-    const limited = candidatePoolSize === 'all' ? withBestLine : withBestLine.slice(0, candidatePoolSize);
+      .filter((x): x is { rec: typeof x.rec; line: NonNullable<typeof x.line> } => {
+        if (x.line == null) return false;
+        const pid = x.line.player_id ?? x.line.resolvedPlayerId ?? x.rec.playerId;
+        return Boolean(pid && objectiveEvalByPlayer.get(pid)?.eligible);
+      })
+      .sort((a, b) => {
+        const pidA = a.line.player_id ?? a.line.resolvedPlayerId ?? a.rec.playerId;
+        const pidB = b.line.player_id ?? b.line.resolvedPlayerId ?? b.rec.playerId;
+        const scoreA = objectiveEvalByPlayer.get(pidA)?.score ?? -Infinity;
+        const scoreB = objectiveEvalByPlayer.get(pidB)?.score ?? -Infinity;
+        return scoreB - scoreA;
+      });
+    const limited = candidatePoolSize === 'all' || candidatePoolSize === 'recommended'
+      ? eligible
+      : eligible.slice(0, candidatePoolSize);
     return limited.map(x => ({ ...x.rec, safeLine: x.line }));
-  }, [gameRecommendationsFiltered, candidatePoolSize]);
+  }, [gameRecommendationsFiltered, candidatePoolSize, objectiveEvalByPlayer]);
 
   // ── Alternate-line custom builder ──────────────────────────────────────
   // Fetch every genuine bookmaker_odds row for the selected match (ladder + O/U),
@@ -725,12 +794,26 @@ export default function MultiOptimizerPanel({
     return [...new Set(pickableLegs.map(l => l.team).filter(Boolean))].sort();
   }, [pickableLegs]);
 
+  // Per-line objective evaluation for Build Your Own Multi — reuses the same
+  // canonical evaluateRecommendationObjective function as Top Recommended Legs,
+  // but applied to THIS specific line's own row (not just the player's best
+  // line), since Build Your Own shows every genuine line per player.
+  const altLineEval = useCallback((leg: PullEmLeg): ObjectiveEvaluation => {
+    return evaluateRecommendationObjective(recommendationObjective, leg.row, intelligenceByPlayer.get(leg.playerId));
+  }, [recommendationObjective, intelligenceByPlayer]);
+
   const altLinesFiltered = useMemo(() => {
     let rows = pickableLegs;
     if (altTeamFilter) rows = rows.filter(l => l.team === altTeamFilter);
     if (altSearch.trim()) {
       const q = altSearch.trim().toLowerCase();
       rows = rows.filter(l => l.playerName.toLowerCase().includes(q));
+    }
+    // "Recommended Lines Only" filters to lines eligible for the selected
+    // objective. Never applied by default — All Valid Lines is the default
+    // manual-picker mode and always shows every genuine, technically valid line.
+    if (manualPickerMode === 'recommendedOnly') {
+      rows = rows.filter(l => altLineEval(l).eligible);
     }
     const sorted = [...rows];
     switch (altSort) {
@@ -742,7 +825,7 @@ export default function MultiOptimizerPanel({
       case 'last5': sorted.sort((a, b) => b.last5HitRate - a.last5HitRate); break;
     }
     return sorted;
-  }, [pickableLegs, altTeamFilter, altSearch, altSort]);
+  }, [pickableLegs, altTeamFilter, altSearch, altSort, manualPickerMode, altLineEval]);
 
   const altSelectedLegs = useMemo(() => {
     const byKey = new Map(pickableLegs.map(l => [legKey(l), l]));
@@ -992,7 +1075,7 @@ export default function MultiOptimizerPanel({
           </select>
           <div className="mt-2 text-xs text-gray-500">
             Selected game: <span className="text-white font-medium">{selectedMatchName}</span>
-            <span className="ml-3">Players with safe lines: <span className="text-emerald-400 font-bold">{safeLineCount}</span></span>
+            <span className="ml-3">{OBJECTIVE_LABELS[recommendationObjective]}-eligible players: <span className="text-emerald-400 font-bold">{objectiveEligibleCount}</span></span>
           </div>
 
           {/* Excluded Players */}
@@ -1205,16 +1288,27 @@ export default function MultiOptimizerPanel({
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Kick-In Data</p><p className="text-gray-400 font-bold">{intelligenceFilterDiagnostics.withKickIns}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">With Score</p><p className="text-emerald-400 font-bold">{intelligenceFilterDiagnostics.withScore}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Missing Sufficient Data</p><p className="text-amber-400 font-bold">{intelligenceFilterDiagnostics.missingSufficientData}</p></div>
-          {/* In Rank Only mode nothing is actually excluded by these signals — the
-              counts below are "how many WOULD fail this category," so labeling
-              them "Excluded" would be misleading. Only Require Any/All Positive
-              modes actually remove a leg for these reasons. */}
-          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">{intelligenceApplicationMode === 'RANK_ONLY' ? 'Negative Matchup Signals' : 'Excl. by Matchup'}</p><p className={intelligenceApplicationMode === 'RANK_ONLY' ? 'text-amber-400 font-bold' : 'text-red-400 font-bold'}>{intelligenceFilterDiagnostics.excludedByMatchup}</p></div>
-          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">{intelligenceApplicationMode === 'RANK_ONLY' ? 'Negative Environment Signals' : 'Excl. by Environment'}</p><p className={intelligenceApplicationMode === 'RANK_ONLY' ? 'text-amber-400 font-bold' : 'text-red-400 font-bold'}>{intelligenceFilterDiagnostics.excludedByEnvironment}</p></div>
-          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">{intelligenceApplicationMode === 'RANK_ONLY' ? 'No Positive Role Signal' : 'Excl. by Role'}</p><p className={intelligenceApplicationMode === 'RANK_ONLY' ? 'text-amber-400 font-bold' : 'text-red-400 font-bold'}>{intelligenceFilterDiagnostics.excludedByRole}</p></div>
-          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">{intelligenceApplicationMode === 'RANK_ONLY' ? 'Insufficient Data Signals' : 'Excl. by Data Req.'}</p><p className={intelligenceApplicationMode === 'RANK_ONLY' ? 'text-amber-400 font-bold' : 'text-red-400 font-bold'}>{intelligenceFilterDiagnostics.excludedByDataRequirement}</p></div>
+          {/* Unconditional signal counts — always reflect what is genuinely visible
+              in the candidate rows, independent of whether the opt-in checkbox
+              filters below are enabled. These must always reconcile with the
+              Very Negative / Role Reduction rows actually shown in the list above. */}
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Very Negative Env</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.veryNegativeEnvironmentSignals}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Negative Position Edge</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.negativePositionSignals}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Role Reduction</p><p className="text-red-400 font-bold">{intelligenceFilterDiagnostics.roleReductionSignals}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Slight Reduction</p><p className="text-amber-400 font-bold">{intelligenceFilterDiagnostics.slightReductionSignals}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">No Positive Role</p><p className="text-amber-400 font-bold">{intelligenceFilterDiagnostics.noPositiveRoleSignals}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Stale/Unverified</p><p className="text-amber-400 font-bold">{intelligenceFilterDiagnostics.staleOrUnverifiedFreshness}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Safest-Eligible</p><p className="text-emerald-400 font-bold">{intelligenceFilterDiagnostics.safestEligible}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Balanced-Eligible</p><p className="text-emerald-400 font-bold">{intelligenceFilterDiagnostics.balancedEligible}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Best Value-Eligible</p><p className="text-emerald-400 font-bold">{intelligenceFilterDiagnostics.bestValueEligible}</p></div>
+          {/* Below: opt-in checkbox filter exclusions (only meaningful when a
+              checkbox is enabled or Require Any/All Positive mode is selected). */}
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Matchup Filter</p><p className="text-orange-400 font-bold">{intelligenceFilterDiagnostics.excludedByMatchup}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Env Filter</p><p className="text-orange-400 font-bold">{intelligenceFilterDiagnostics.excludedByEnvironment}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Role Filter</p><p className="text-orange-400 font-bold">{intelligenceFilterDiagnostics.excludedByRole}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Excl. by Data Filter</p><p className="text-orange-400 font-bold">{intelligenceFilterDiagnostics.excludedByDataRequirement}</p></div>
           <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Removed By Mode</p><p className="text-orange-400 font-bold">{intelligenceApplicationMode === 'RANK_ONLY' ? 0 : intelligenceFilterDiagnostics.removedByApplicationMode}</p></div>
-          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">After Filters</p><p className="text-white font-bold">{gameRecommendationsFiltered.filter(r => r.safeLine).length}</p></div>
+          <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">In Candidate Pool</p><p className="text-white font-bold">{candidateLegs.length}</p></div>
         </div>
       </div>
       )}
@@ -1263,11 +1357,26 @@ export default function MultiOptimizerPanel({
         </div>
       )}
 
-      {/* Section A — Best Individual Legs */}
+      {/* Section A — Top Recommended Legs (strict, objective-gated) */}
       {gameRecommendationsFiltered.length > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <h3 className="text-white font-semibold text-sm">Best Individual Disposal Legs</h3>
+            <h3 className="text-white font-semibold text-sm">Top Recommended Legs</h3>
+            <div className="flex items-center gap-1">
+              {(['safest', 'balanced', 'bestValue'] as RecommendationObjective[]).map(obj => (
+                <button
+                  key={obj}
+                  onClick={() => setRecommendationObjective(obj)}
+                  className={`text-[10px] px-2 py-1 rounded font-medium transition ${
+                    recommendationObjective === obj
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'bg-gray-800 text-gray-400 border border-gray-700 hover:border-gray-600'
+                  }`}
+                >
+                  {OBJECTIVE_LABELS[obj]}
+                </button>
+              ))}
+            </div>
             <div className="flex items-center gap-2">
               <label className="text-[10px] text-gray-500 uppercase">Candidate Pool</label>
               <select
@@ -1277,15 +1386,18 @@ export default function MultiOptimizerPanel({
                   setCandidatePoolSize(v === 'recommended' || v === 'all' ? v : (Number(v) as 10 | 15 | 20));
                 }}
                 className="bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1">
-                <option value="recommended">Recommended ({safeLineCount})</option>
+                <option value="recommended">Recommended ({objectiveEligibleCount})</option>
                 <option value="10">Top 10</option>
                 <option value="15">Top 15</option>
                 <option value="20">Top 20</option>
-                <option value="all">All Valid Players</option>
+                <option value="all">All Eligible</option>
               </select>
             </div>
             <span className="text-[10px] text-gray-500">Click a badge row to open Player Intelligence</span>
           </div>
+          {recommendationObjective === 'bestValue' && (
+            <p className="text-[10px] text-amber-400 mb-2">Value focused — not the highest-probability multi.</p>
+          )}
           <div className="mb-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
             <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Genuine Lines</p><p className="text-white font-bold">{allLinesResult?.legs.length ?? 0}</p></div>
             <div className="bg-gray-800 rounded p-1.5"><p className="text-gray-500 uppercase">Resolved Valid Lines</p><p className="text-white font-bold">{pickableLegs.length}</p></div>
@@ -1395,6 +1507,17 @@ export default function MultiOptimizerPanel({
                 <option value="last5">Last-5 hit rate</option>
               </select>
             </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-[10px] text-gray-500 uppercase">Show</label>
+              <select
+                value={manualPickerMode}
+                onChange={e => setManualPickerMode(e.target.value as typeof manualPickerMode)}
+                className="bg-gray-800 border border-gray-700 text-white text-xs rounded-lg px-2 py-1.5"
+              >
+                <option value="all">All Valid Lines</option>
+                <option value="recommendedOnly">Recommended Lines Only ({OBJECTIVE_LABELS[recommendationObjective]})</option>
+              </select>
+            </div>
           </div>
 
           {altConflictMsg && (
@@ -1420,6 +1543,7 @@ export default function MultiOptimizerPanel({
               const fr = leg.row.freshness;
               const isStale = Boolean(fr && fr.freshnessStatus !== 'CURRENT');
               const intel = intelligenceByPlayer.get(leg.playerId);
+              const objEval = altLineEval(leg);
               return (
                 <div
                   key={key}
@@ -1460,6 +1584,23 @@ export default function MultiOptimizerPanel({
                   {intel && (
                     <div className="mt-1.5" onClick={e => e.stopPropagation()}>
                       <IntelBadges intel={intel} onClick={() => setDrawerPlayerId(leg.playerId)} />
+                    </div>
+                  )}
+                  {!objEval.eligible && (
+                    <div className="mt-1.5 flex flex-wrap gap-1" onClick={e => e.stopPropagation()}>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                        Not recommended for {OBJECTIVE_LABELS[recommendationObjective]} mode
+                      </span>
+                      {objEval.rejectionReasons.slice(0, 3).map((r, i) => (
+                        <span key={i} className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">{r}</span>
+                      ))}
+                    </div>
+                  )}
+                  {objEval.eligible && objEval.warnings.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1" onClick={e => e.stopPropagation()}>
+                      {objEval.warnings.map((w, i) => (
+                        <span key={i} className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">{w}</span>
+                      ))}
                     </div>
                   )}
                 </div>

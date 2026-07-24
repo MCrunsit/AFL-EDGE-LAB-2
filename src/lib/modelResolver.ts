@@ -26,15 +26,39 @@ async function getLatestCompletedStatsRound(): Promise<number | null> {
     const today = new Date().toISOString().split('T')[0];
     const { data } = await supabase
       .from('matches')
-      .select('round')
+      .select('round, match_date')
       .eq('season', 2026)
-      .lt('match_date', today)
-      .neq('round', '0')
-      .order('round', { ascending: false })
-      .limit(1);
-    if (data && data.length > 0 && data[0].round) {
-      return parseInt(data[0].round, 10);
+      .neq('round', '0');
+    if (!data) return null;
+    // A round only counts as "completed" once EVERY match in it has been
+    // played — not once ANY match in it has a past date. `round` is also
+    // stored as text ("9", "20", ...), so it must be parsed and compared
+    // numerically, never sorted/ordered as text (lexicographic "9" > "20").
+    // Getting either wrong marks players CURRENT before their team has
+    // actually played that round (e.g. one Thursday-night game completing
+    // makes the naive "any past match" check call the whole round done,
+    // while eight Friday/Saturday/Sunday games in that same round are still
+    // upcoming).
+    const byRound = new Map<number, { maxDate: string; hasNullDate: boolean }>();
+    for (const row of data) {
+      const n = parseInt(row.round ?? '', 10);
+      if (Number.isNaN(n)) continue;
+      const entry = byRound.get(n) ?? { maxDate: '', hasNullDate: false };
+      if (!row.match_date) {
+        entry.hasNullDate = true;
+      } else if (row.match_date > entry.maxDate) {
+        entry.maxDate = row.match_date;
+      }
+      byRound.set(n, entry);
     }
+    let maxCompletedRound: number | null = null;
+    for (const [round, entry] of byRound) {
+      if (entry.hasNullDate || !entry.maxDate) continue;
+      if (entry.maxDate < today && (maxCompletedRound === null || round > maxCompletedRound)) {
+        maxCompletedRound = round;
+      }
+    }
+    return maxCompletedRound;
   } catch { /* ignore */ }
   return null;
 }

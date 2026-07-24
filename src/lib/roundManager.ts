@@ -20,22 +20,52 @@ function parseRoundNum(round: string | null): number {
 }
 
 /**
- * Detect the latest completed stats round from player_game_stats.
- * This is the round modelled stats are available through.
+ * Detect the latest FULLY completed round — every match in the round must
+ * have a match_date in the past, not just one. A single Thursday-night game
+ * finishing (and its stats syncing) does not mean the whole round is done;
+ * treating it as "completed" makes nextBettingRound skip straight past the
+ * round that's still actually in progress (e.g. computing round 21 as next
+ * when round 20 has only played one of nine games), which is why the Multi
+ * Builder's "Auto / Next Betting Round" can silently resolve to zero matches.
  */
 export async function getLatestCompletedStatsRound(season = 2026): Promise<{ round: string | null; roundNum: number; matchDate: string | null }> {
+  const today = new Date().toISOString().split('T')[0];
   const { data } = await supabase
-    .from('player_game_stats')
-    .select('match_date, match_id, matches:match_id(round)')
-    .order('match_date', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .from('matches')
+    .select('round, match_date')
+    .eq('season', season)
+    .neq('round', '0');
 
-  if (data) {
-    const round = (data as any)?.matches?.round ?? null;
-    return { round, roundNum: parseRoundNum(round), matchDate: data.match_date };
+  if (!data) return { round: null, roundNum: 0, matchDate: null };
+
+  const byRound = new Map<number, { maxDate: string; hasNullDate: boolean }>();
+  for (const row of data) {
+    const n = parseRoundNum(row.round);
+    if (!n) continue;
+    const entry = byRound.get(n) ?? { maxDate: '', hasNullDate: false };
+    if (!row.match_date) {
+      entry.hasNullDate = true;
+    } else if (row.match_date > entry.maxDate) {
+      entry.maxDate = row.match_date;
+    }
+    byRound.set(n, entry);
   }
-  return { round: null, roundNum: 0, matchDate: null };
+
+  let bestRound: number | null = null;
+  let bestDate = '';
+  for (const [round, entry] of byRound) {
+    if (entry.hasNullDate || !entry.maxDate) continue;
+    if (entry.maxDate < today && (bestRound === null || round > bestRound)) {
+      bestRound = round;
+      bestDate = entry.maxDate;
+    }
+  }
+
+  return {
+    round: bestRound !== null ? String(bestRound) : null,
+    roundNum: bestRound ?? 0,
+    matchDate: bestRound !== null ? bestDate : null,
+  };
 }
 
 /**
