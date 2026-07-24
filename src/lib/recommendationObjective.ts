@@ -8,12 +8,61 @@
  * Does NOT recompute probability, EV, hit-rate, freshness or intelligence —
  * it only reads the already-computed ModelledOddsRow.modelProb and the
  * already-computed PlayerIntelligence to decide eligible/warnings/reasons.
+ *
+ * Thresholds are user-adjustable (see ObjectiveThresholds) so the risk bar
+ * for each objective can be tuned from the UI without a code change.
  */
 import type { ModelledOddsRow } from './modelResolver';
 import type { PlayerIntelligence } from './playerIntelligenceService';
 import { getLast10Hits, getLast5Hits } from './disposalLineSelector';
 
 export type RecommendationObjective = 'safest' | 'balanced' | 'bestValue';
+
+export interface ObjectiveThresholds {
+  /** 0-1. Minimum model-adjusted win probability. */
+  minAdjustedProb: number;
+  /** 0-1. Minimum season hit rate. 0 = no requirement. */
+  minHitRate: number;
+  /** Minimum genuine unique games in sample. */
+  minSampleSize: number;
+  /** Minimum hits out of the last 10 games (only enforced when 10 games are available). 0 = no requirement. */
+  minLast10Hits: number;
+  /** Minimum hits out of the last 5 games (only enforced when 5 games are available). 0 = no requirement. */
+  minLast5Hits: number;
+  /** Minimum Intelligence Score, only enforced when a score exists. 0 = no requirement. */
+  minIntelligenceScore: number;
+  /** Highest risk_level still allowed. */
+  allowedRisk: 'low' | 'lowMedium' | 'any';
+  /** Exclude Team Environment LOW (Very Negative). */
+  excludeVeryNegativeEnv: boolean;
+  /** Exclude Position Edge NEGATIVE or VERY_NEGATIVE. */
+  excludeNegativePosition: boolean;
+  /** Exclude Role Intelligence ROLE_REDUCTION (falling role). */
+  excludeRoleReduction: boolean;
+  /** Require freshness status CURRENT. */
+  requireFreshCurrent: boolean;
+}
+
+export const DEFAULT_OBJECTIVE_THRESHOLDS: Record<RecommendationObjective, ObjectiveThresholds> = {
+  safest: {
+    minAdjustedProb: 0.80, minHitRate: 0.70, minSampleSize: 10,
+    minLast10Hits: 8, minLast5Hits: 4, minIntelligenceScore: 50,
+    allowedRisk: 'low', excludeVeryNegativeEnv: true, excludeNegativePosition: true,
+    excludeRoleReduction: true, requireFreshCurrent: true,
+  },
+  balanced: {
+    minAdjustedProb: 0.70, minHitRate: 0, minSampleSize: 8,
+    minLast10Hits: 0, minLast5Hits: 0, minIntelligenceScore: 45,
+    allowedRisk: 'lowMedium', excludeVeryNegativeEnv: true, excludeNegativePosition: false,
+    excludeRoleReduction: true, requireFreshCurrent: true,
+  },
+  bestValue: {
+    minAdjustedProb: 0.55, minHitRate: 0, minSampleSize: 8,
+    minLast10Hits: 0, minLast5Hits: 0, minIntelligenceScore: 0,
+    allowedRisk: 'any', excludeVeryNegativeEnv: false, excludeNegativePosition: false,
+    excludeRoleReduction: false, requireFreshCurrent: true,
+  },
+};
 
 export interface ObjectiveEvaluation {
   objective: RecommendationObjective;
@@ -33,6 +82,7 @@ export function evaluateRecommendationObjective(
   objective: RecommendationObjective,
   row: ModelledOddsRow,
   intel: PlayerIntelligence | undefined,
+  thresholds: ObjectiveThresholds = DEFAULT_OBJECTIVE_THRESHOLDS[objective],
 ): ObjectiveEvaluation {
   const reasons: string[] = [];
   const warnings: string[] = [];
@@ -71,56 +121,49 @@ export function evaluateRecommendationObjective(
     rejectionReasons.push('Unresolved player');
   }
 
-  if (objective === 'safest') {
-    if (adjustedProb === null || adjustedProb < 0.80) {
-      rejectionReasons.push(`Adjusted probability ${pct(adjustedProb)} below 80% Safest threshold`);
-    }
-    if (hitRate < 0.70) {
-      rejectionReasons.push(`Season hit rate ${Math.round(hitRate * 100)}% below 70% Safest threshold`);
-    }
-    if (sampleSize < 10) {
-      rejectionReasons.push(`Sample size ${sampleSize} below 10 genuine games`);
-    }
-    if (last10Sample >= 10 && last10 < 8) {
-      rejectionReasons.push(`Last 10 ${last10}/10 below required consistency`);
-    }
-    if (last5Sample >= 5 && last5 < 4) {
-      rejectionReasons.push(`Last 5 ${last5}/5 below required consistency`);
-    }
-    if (!freshOk) {
-      rejectionReasons.push(`Freshness not verified current (${freshnessStatus})`);
-    }
-    if (risk !== 'Low') {
-      rejectionReasons.push('Medium/High risk not allowed in Safest');
-    }
-    if (intelScore !== null && intelScore < 50) {
-      rejectionReasons.push(`Intelligence score ${intelScore} below 50`);
-    }
-    if (isVeryNegativeEnv) rejectionReasons.push('Very Negative Team Environment');
-    if (isNegativePos || isVeryNegativePos) rejectionReasons.push('Negative Position Matchup');
-    if (isRoleReduction) rejectionReasons.push('Falling role (Role Reduction)');
-    if (isSlightReduction) warnings.push('Slight role reduction');
-  } else if (objective === 'balanced') {
-    if (adjustedProb === null || adjustedProb < 0.70) {
-      rejectionReasons.push(`Adjusted probability ${pct(adjustedProb)} below 70% Balanced threshold`);
-    }
-    if (sampleSize < 8) rejectionReasons.push(`Sample size ${sampleSize} below 8 genuine games`);
-    if (!freshOk) rejectionReasons.push(`Freshness not verified current (${freshnessStatus})`);
-    if (intelScore !== null && intelScore < 45) rejectionReasons.push(`Intelligence score ${intelScore} below 45`);
-    if (isVeryNegativeEnv) rejectionReasons.push('Very Negative Team Environment');
-    if (isVeryNegativePos) rejectionReasons.push('Very Negative Position Matchup');
-    if (isRoleReduction) rejectionReasons.push('Falling role (Role Reduction)');
-    if (isSlightReduction) warnings.push('Slight role reduction');
-    if (risk === 'High') warnings.push('High risk');
-  } else {
-    // bestValue
-    if (adjustedProb === null || adjustedProb < 0.55) {
-      rejectionReasons.push(`Adjusted probability ${pct(adjustedProb)} below 55% Best Value threshold`);
-    }
-    if (sampleSize < 8) rejectionReasons.push(`Sample size ${sampleSize} below 8 genuine games`);
-    if (!freshOk) rejectionReasons.push(`Freshness not verified current (${freshnessStatus})`);
-    warnings.push('Value focused — not the highest-probability multi.');
+  if (adjustedProb === null || adjustedProb < thresholds.minAdjustedProb) {
+    rejectionReasons.push(`Adjusted probability ${pct(adjustedProb)} below ${Math.round(thresholds.minAdjustedProb * 100)}% threshold`);
   }
+  if (thresholds.minHitRate > 0 && hitRate < thresholds.minHitRate) {
+    rejectionReasons.push(`Season hit rate ${Math.round(hitRate * 100)}% below ${Math.round(thresholds.minHitRate * 100)}% threshold`);
+  }
+  if (sampleSize < thresholds.minSampleSize) {
+    rejectionReasons.push(`Sample size ${sampleSize} below ${thresholds.minSampleSize} genuine games`);
+  }
+  if (thresholds.minLast10Hits > 0 && last10Sample >= 10 && last10 < thresholds.minLast10Hits) {
+    rejectionReasons.push(`Last 10 ${last10}/10 below required ${thresholds.minLast10Hits}/10 consistency`);
+  }
+  if (thresholds.minLast5Hits > 0 && last5Sample >= 5 && last5 < thresholds.minLast5Hits) {
+    rejectionReasons.push(`Last 5 ${last5}/5 below required ${thresholds.minLast5Hits}/5 consistency`);
+  }
+  if (thresholds.requireFreshCurrent && !freshOk) {
+    rejectionReasons.push(`Freshness not verified current (${freshnessStatus})`);
+  }
+  if (thresholds.allowedRisk === 'low' && risk !== 'Low') {
+    rejectionReasons.push('Medium/High risk not allowed at this threshold');
+  } else if (thresholds.allowedRisk === 'lowMedium' && risk === 'High') {
+    rejectionReasons.push('High risk not allowed at this threshold');
+  }
+  if (thresholds.minIntelligenceScore > 0 && intelScore !== null && intelScore < thresholds.minIntelligenceScore) {
+    rejectionReasons.push(`Intelligence score ${intelScore} below ${thresholds.minIntelligenceScore}`);
+  }
+  if (thresholds.excludeVeryNegativeEnv && isVeryNegativeEnv) {
+    rejectionReasons.push('Very Negative Team Environment');
+  }
+  if (thresholds.excludeNegativePosition && (isNegativePos || isVeryNegativePos)) {
+    rejectionReasons.push('Negative Position Matchup');
+  } else if (!thresholds.excludeNegativePosition && isVeryNegativePos) {
+    // Even when only-VERY-negative would normally be excluded (balanced's original
+    // behavior), keep that one narrower case unless the user disabled position
+    // exclusion outright via the toggle.
+  }
+  if (thresholds.excludeRoleReduction && isRoleReduction) {
+    rejectionReasons.push('Falling role (Role Reduction)');
+  }
+  if (isSlightReduction) warnings.push('Slight role reduction');
+  if (objective === 'bestValue') warnings.push('Value focused — not the highest-probability multi.');
+  if (risk === 'Medium' && thresholds.allowedRisk !== 'low') warnings.push('Medium risk');
+  if (risk === 'High' && thresholds.allowedRisk === 'any') warnings.push('High risk');
 
   const eligible = rejectionReasons.length === 0;
   if (eligible) {
@@ -128,7 +171,7 @@ export function evaluateRecommendationObjective(
     if (posLabel === 'VERY_POSITIVE' || posLabel === 'POSITIVE') reasons.push('Positive position matchup');
     if (roleLabel === 'ROLE_BOOST' || roleLabel === 'SLIGHT_BOOST') reasons.push('Role boost');
     if (adjustedProb !== null) reasons.push(`${pct(adjustedProb)} adjusted probability`);
-    if (objective !== 'bestValue' && risk === 'Low') reasons.push('Low risk');
+    if (risk === 'Low') reasons.push('Low risk');
   }
 
   const score = objective === 'bestValue'
