@@ -1346,7 +1346,8 @@ export default function MultiBuilderPage() {
           <div>
             <label className="block text-xs text-gray-500 mb-1">Min Adj. EV %</label>
             <select value={minAdjustedEV} onChange={e => setMinAdjustedEV(Number(e.target.value))} className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-white text-sm">
-              {[3, 5, 8, 10, 15].map(n => <option key={n} value={n}>{n}%+</option>)}
+              <option value={-50}>Off — no EV requirement</option>
+              {[-20, -10, -5, 0, 3, 5, 8, 10, 15].map(n => <option key={n} value={n}>{n}%+</option>)}
             </select>
           </div>
           <div className="col-span-2 flex items-center gap-4">
