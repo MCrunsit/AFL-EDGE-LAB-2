@@ -135,7 +135,16 @@ export interface PlayerIntelligence {
   intelligenceScore: number | null;
   intelligenceLabel: IntelligenceLabel;
 
-  dataConfidence: number | null;
+  /** Coverage of the Intelligence Score's own inputs (0-1: how many of its
+   * weighted components had data available). This is NOT the spec's "Data
+   * Confidence" metric — see dataConfidence below for that. Kept under its
+   * own name to avoid the two being confused in the UI. */
+  intelligenceCoverage: number | null;
+
+  /** Genuine data-quality measure, 0-100%: how complete/fresh/trustworthy the
+   * data behind this line is. Independent of hit probability and Intelligence
+   * Score by design — must never be displayed or treated as a win chance. */
+  dataConfidence: number;
 }
 
 // ── Shared Position Edge cache — loaded once, independent of the "Use Position
@@ -580,13 +589,21 @@ export function computePlayerIntelligence(input: PlayerIntelligenceInput): Playe
 
   let intelligenceScore: number | null = null;
   let intelligenceLabel: IntelligenceLabel = 'UNRATED';
-  let dataConfidence: number | null = null;
+  let intelligenceCoverage: number | null = null;
 
   if (hasEnoughEvidence) {
     intelligenceScore = Math.round(components.reduce((s, c) => s + c.value * c.weight, 0) / totalWeight);
     intelligenceLabel = labelFromScore(intelligenceScore);
-    dataConfidence = Math.round(totalWeight * 100) / 100;
+    intelligenceCoverage = Math.round(totalWeight * 100) / 100;
   }
+
+  const dataConfidence = computeDataConfidence({
+    row, positionGroup,
+    cbaAvailable: cba.available,
+    kickInsAvailable: kickIns.available,
+    uncontestedSampleGames: possessionEnvironment.uncontested.playerSampleGames,
+    contestedSampleGames: possessionEnvironment.contested.playerSampleGames,
+  });
 
   return {
     playerId, playerName, team, matchId,
@@ -594,6 +611,79 @@ export function computePlayerIntelligence(input: PlayerIntelligenceInput): Playe
     positives: positives.slice(0, 3),
     risks: risks.slice(0, 3),
     missingData,
-    intelligenceScore, intelligenceLabel, dataConfidence,
+    intelligenceScore, intelligenceLabel, intelligenceCoverage,
+    dataConfidence,
   };
+}
+
+export interface DataConfidenceInput {
+  row: ModelledOddsRow;
+  positionGroup: string;
+  cbaAvailable: boolean;
+  kickInsAvailable: boolean;
+  uncontestedSampleGames: number;
+  contestedSampleGames: number;
+  hasUnresolvedDataConflict?: boolean;
+}
+
+/**
+ * Data Confidence — a genuine data-quality measure (0-100%), separate from
+ * both hit probability and Intelligence Score. It answers "how complete and
+ * trustworthy is the data behind this line", not "how likely is this player
+ * to clear it". A player can have 100% Data Confidence and still miss the
+ * line; a player with 40% Data Confidence might still hit it — the two are
+ * independent by design (per the project's explicit requirement that Data
+ * Confidence must never be displayed or treated as a probability).
+ *
+ * Every component below is a real, inspectable data-quality signal already
+ * present on the row / intelligence inputs — nothing here is invented.
+ */
+export function computeDataConfidence(input: DataConfidenceInput): number {
+  const {
+    row, positionGroup, cbaAvailable, kickInsAvailable,
+    uncontestedSampleGames, contestedSampleGames, hasUnresolvedDataConflict,
+  } = input;
+  const checks: { pass: boolean; weight: number }[] = [];
+
+  // Historical sample size (season games available)
+  checks.push({ pass: row.modelProb.sample_size >= 15, weight: 12 });
+  checks.push({ pass: row.modelProb.sample_size >= 5, weight: 6 });
+
+  // player_game_stats completeness proxy: enough non-null stat values seen
+  checks.push({ pass: row.nonNullStatValues >= row.modelProb.sample_size, weight: 6 });
+
+  // Resolved player and team identity
+  checks.push({ pass: !!row.resolvedPlayerId, weight: 10 });
+  checks.push({ pass: !row.isWrongTeam, weight: 6 });
+
+  // Known position group (not UNKNOWN)
+  checks.push({ pass: positionGroup !== 'UNKNOWN', weight: 8 });
+
+  // Opponent / venue sample size (context stats)
+  const context = row.modelProb.context;
+  checks.push({ pass: (context?.opponent_games ?? 0) >= 3, weight: 6 });
+  checks.push({ pass: (context?.venue_games ?? 0) >= 3, weight: 6 });
+
+  // Freshness
+  checks.push({ pass: row.freshness?.freshnessStatus === 'CURRENT', weight: 10 });
+
+  // Complete bookmaker line (genuine over odds present and line resolved)
+  checks.push({ pass: row.over_odds > 1 && Number.isFinite(row.line), weight: 8 });
+
+  // Role-data coverage (CBA / kick-in) — only expected where genuinely imported;
+  // absence is a real gap, so it still counts against confidence, but modestly
+  checks.push({ pass: cbaAvailable, weight: 4 });
+  checks.push({ pass: kickInsAvailable, weight: 4 });
+
+  // CP/UP possession data completeness
+  checks.push({ pass: uncontestedSampleGames >= 3, weight: 5 });
+  checks.push({ pass: contestedSampleGames >= 3, weight: 5 });
+
+  // Absence of unresolved data-correction conflicts for this player
+  checks.push({ pass: !hasUnresolvedDataConflict, weight: 4 });
+
+  const totalWeight = checks.reduce((s, c) => s + c.weight, 0);
+  const earnedWeight = checks.reduce((s, c) => s + (c.pass ? c.weight : 0), 0);
+
+  return Math.round((earnedWeight / totalWeight) * 100);
 }

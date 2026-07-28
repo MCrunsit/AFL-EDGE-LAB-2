@@ -258,10 +258,13 @@ export default function PlayerIntelligenceDrawer({
             ) : (
               <p className="text-lg font-bold text-gray-500 mt-1">Unrated</p>
             )}
-            <p className="text-[10px] text-gray-500 mt-1">
-              Data confidence: {intel.dataConfidence !== null ? `${Math.round(intel.dataConfidence * 100)}%` : 'Unknown'}
+            <p
+              className="text-[10px] text-gray-500 mt-1"
+              title="Data quality/completeness for this player's line — NOT a win chance. A high Data Confidence does not mean a high chance of hitting the line."
+            >
+              Data Confidence: {intel.dataConfidence}%
             </p>
-            <p className="text-[9px] text-gray-600 mt-1">Decision support only — not a guaranteed outcome.</p>
+            <p className="text-[9px] text-gray-600 mt-1">Intelligence Score is contextual decision support, not a hit probability. Decision support only — not a guaranteed outcome.</p>
           </div>
 
           {/* Positives / Risks / Missing */}

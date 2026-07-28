@@ -3649,7 +3649,12 @@ export default function EVCalculatorPage() {
                   <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Team: {selectedPlayerDetail.playerTeam || '—'}</span>
                   <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Pos: {selectedPlayerDetail.positionGroup}</span>
                   {selectedPlayerDetail.positionEdge && (
-                    <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Conf: {selectedPlayerDetail.positionEdge.confidence}</span>
+                    <span
+                      className="px-2 py-0.5 rounded bg-gray-800 text-gray-300"
+                      title="Position Edge sample-size confidence — not the Data Confidence data-quality metric shown elsewhere."
+                    >
+                      Position Edge Sample: {selectedPlayerDetail.positionEdge.confidence}
+                    </span>
                   )}
                 </div>
               </div>
