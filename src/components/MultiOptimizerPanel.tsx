@@ -25,6 +25,10 @@ import {
 import { buildGameGetUp, applyBoost, type GameGetUpResult, type GameGetUpMulti, type GameGetUpLegView, type QualityTier } from '../lib/gameGetUp';
 import { getCanonicalPlayerGameLog, type CanonicalGameRow } from '../lib/canonicalGameLog';
 import {
+  buildRoundMulti, buildGameBlock, combineGameBlocks, ROUND_MULTI_PRESETS,
+  type RoundMultiPresetName, type RoundMultiResult, type GameBlock, type GameBlockLegView,
+} from '../lib/roundMulti';
+import {
   evaluateRecommendationObjective, OBJECTIVE_LABELS, DEFAULT_OBJECTIVE_THRESHOLDS,
   type RecommendationObjective, type ObjectiveEvaluation, type ObjectiveThresholds,
 } from '../lib/recommendationObjective';
@@ -459,6 +463,178 @@ function GameGetUpSection({
   );
 }
 
+function GameBlockLegRow({ view }: { view: GameBlockLegView }) {
+  const { leg, safety, dataConfidence, intelligenceScore } = view;
+  const fb = safety.floorBuffer;
+  return (
+    <div className="p-3 border-t border-gray-800 first:border-t-0">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-white font-medium text-sm">{leg.playerName}</span>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-cyan-400">Disposals {leg.displayLabel ?? `${leg.line}+`}</span>
+          <span className="text-white font-bold">${leg.odds.toFixed(2)}</span>
+        </div>
+      </div>
+      <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+        <span className="text-gray-400">Adjusted Hit Probability: <span className="text-white font-semibold">{(leg.adjustedProb * 100).toFixed(0)}%</span></span>
+        <span className="text-gray-400">Safety Score: <span className="text-white font-semibold">{safety.score ?? 'Unrated'}</span></span>
+        <span className="text-gray-400">Intelligence Score: <span className="text-white font-semibold">{intelligenceScore ?? 'Unrated'}</span></span>
+        <span className="text-gray-400">Data Confidence: <span className="text-white font-semibold">{dataConfidence ?? '—'}%</span></span>
+      </div>
+      {fb.sampleSize > 0 && (
+        <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-x-2 gap-y-0.5 text-[10px] text-gray-500">
+          <span>Last-5 min margin: {fb.last5MinMargin ?? '—'}</span>
+          <span>Last-10 min margin: {fb.last10MinMargin ?? '—'}</span>
+          <span>Median margin: {fb.medianMargin?.toFixed(1) ?? '—'}</span>
+          <span>10th pct margin: {fb.p10Margin?.toFixed(1) ?? '—'}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameBlockCard({
+  block, isExcluded, isRegenerating, onRegenerate, onToggleExclude,
+}: {
+  block: GameBlock;
+  isExcluded: boolean;
+  isRegenerating: boolean;
+  onRegenerate: () => void;
+  onToggleExclude: () => void;
+}) {
+  return (
+    <div className={`bg-gray-900 border rounded-xl overflow-hidden ${isExcluded ? 'border-gray-800 opacity-50' : 'border-gray-800'}`}>
+      <div className="p-3 flex items-center justify-between flex-wrap gap-2 border-b border-gray-800">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${tierColor(block.tier)}`}>{tierLabel(block.tier)}</span>
+          <span className="text-sm text-white font-semibold">{block.matchName}</span>
+          {isExcluded && <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-400">Excluded</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-white font-bold text-sm">${block.combinedOdds > 0 ? block.combinedOdds.toFixed(2) : '—'}</span>
+          <button
+            onClick={onRegenerate}
+            disabled={isRegenerating}
+            className="text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded transition"
+          >
+            {isRegenerating ? <Loader2 className="w-3 h-3 animate-spin inline" /> : 'Regenerate'}
+          </button>
+          <button
+            onClick={onToggleExclude}
+            className={`text-[10px] px-2 py-1 rounded transition ${isExcluded ? 'bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30' : 'bg-red-500/10 text-red-400 hover:bg-red-500/20'}`}
+          >
+            {isExcluded ? 'Restore' : 'Exclude'}
+          </button>
+        </div>
+      </div>
+      {block.noGenuineLinesAvailable ? (
+        <p className="text-xs text-amber-400 p-3">No genuine bookmaker disposal lines available for this match yet.</p>
+      ) : block.legs.length === 0 ? (
+        <p className="text-xs text-gray-500 p-3">No qualifying legs found for this match under the current settings.</p>
+      ) : (
+        <>
+          <div className="p-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] border-b border-gray-800">
+            <span className="text-gray-400">Conservative probability: <span className="text-white font-semibold">{(block.conservativeProbability * 100).toFixed(1)}%</span></span>
+            <span className="text-gray-400">Avg Safety Score: <span className="text-white font-semibold">{block.avgSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Min Safety Score: <span className="text-white font-semibold">{block.minSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Avg Data Confidence: <span className="text-white font-semibold">{block.avgDataConfidence ?? '—'}%</span></span>
+          </div>
+          {block.tierGapReasons.length > 0 && (
+            <div className="px-3 py-2 border-b border-gray-800 bg-gray-950/50">
+              <p className="text-[10px] text-amber-400 font-semibold uppercase mb-1">Why not the tier above</p>
+              {block.tierGapReasons.map((r, i) => <p key={i} className="text-[10px] text-gray-400">{r}</p>)}
+            </div>
+          )}
+          <div>
+            {block.legViews.map((lv, i) => <GameBlockLegRow key={i} view={lv} />)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RoundMultiSection({
+  result, loading, error, preset, onPresetChange, excludedMatchIds, regeneratingMatchId,
+  onBuild, onRegenerate, onToggleExclude,
+}: {
+  result: RoundMultiResult | null;
+  loading: boolean;
+  error: string | null;
+  preset: RoundMultiPresetName;
+  onPresetChange: (p: RoundMultiPresetName) => void;
+  excludedMatchIds: Set<string>;
+  regeneratingMatchId: string | null;
+  onBuild: () => void;
+  onRegenerate: (matchId: string, matchName: string) => void;
+  onToggleExclude: (matchId: string) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h3 className="text-white font-semibold text-sm">Round Multi</h3>
+            <p className="text-gray-500 text-xs">A safe Game Block from each match in the round, combined into one multi. Total odds are expected to run high — that's not an error.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={preset}
+              onChange={e => onPresetChange(e.target.value as RoundMultiPresetName)}
+              className="bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1.5"
+            >
+              <option value="FULL_ROUND_STANDARD">Full Round — Standard</option>
+              <option value="FULL_ROUND_SAFEST">Full Round — Safest</option>
+              <option value="ONE_LEG_PER_GAME">One Leg From Every Game</option>
+            </select>
+            <button
+              onClick={onBuild}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-bold rounded-lg transition"
+            >
+              {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+              Build Round Multi
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {error && <p className="text-xs text-red-400 px-1">{error}</p>}
+
+      {result && (
+        <>
+          <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <span className="text-gray-400">Games represented: <span className="text-white font-bold">{result.gamesRepresented}</span></span>
+            <span className="text-gray-400">Total legs: <span className="text-white font-bold">{result.totalLegs}</span></span>
+            <span className="text-gray-400">Total odds: <span className="text-white font-bold">${result.totalOdds.toFixed(2)}</span></span>
+            <span className="text-gray-400">Conservative probability: <span className="text-white font-bold">{(result.conservativeProbability * 100).toFixed(2)}%</span></span>
+            <span className="text-gray-400">Avg Safety Score: <span className="text-white font-bold">{result.avgSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Min Safety Score: <span className="text-white font-bold">{result.minSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Weakest leg: <span className="text-white font-bold">{result.weakestLeg?.playerName ?? '—'}</span></span>
+            <span className="text-gray-400">Weakest Game Block: <span className="text-white font-bold">{result.weakestGameBlock?.matchName ?? '—'}</span></span>
+          </div>
+          {result.gamesWithRelaxedRequirements.length > 0 && (
+            <p className="text-[10px] text-amber-400 px-1">Relaxed requirements applied in: {result.gamesWithRelaxedRequirements.join(', ')}</p>
+          )}
+          <div className="space-y-2">
+            {result.blocks.map(block => (
+              <GameBlockCard
+                key={block.matchId}
+                block={block}
+                isExcluded={excludedMatchIds.has(block.matchId)}
+                isRegenerating={regeneratingMatchId === block.matchId}
+                onRegenerate={() => onRegenerate(block.matchId, block.matchName)}
+                onToggleExclude={() => onToggleExclude(block.matchId)}
+              />
+            ))}
+          </div>
+          <p className="px-1 text-[9px] text-gray-600">Decision support only — no leg, Game Block, or Round Multi is guaranteed.</p>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function MultiOptimizerPanel({
   recommendations, matchNames, matches, selectedMatchId, onSelectMatch,
   statsRoundLabel, lineSafety, onLineSafetyChange, teamEnvMap, teamMatchups, teamStats, roleTrends,
@@ -472,6 +648,13 @@ export default function MultiOptimizerPanel({
   const [gameGetUpError, setGameGetUpError] = useState<string | null>(null);
   const [gameGetUpBoost, setGameGetUpBoost] = useState(1.0);
   const gameGetUpCancelRef = useRef<CancellationRef>({ cancelled: false });
+  const [roundMultiPreset, setRoundMultiPreset] = useState<RoundMultiPresetName>('FULL_ROUND_STANDARD');
+  const [roundMultiResult, setRoundMultiResult] = useState<RoundMultiResult | null>(null);
+  const [roundMultiLoading, setRoundMultiLoading] = useState(false);
+  const [roundMultiError, setRoundMultiError] = useState<string | null>(null);
+  const [roundMultiExcluded, setRoundMultiExcluded] = useState<Set<string>>(new Set());
+  const [regeneratingMatchId, setRegeneratingMatchId] = useState<string | null>(null);
+  const roundMultiCancelRef = useRef<CancellationRef>({ cancelled: false });
   const [expandedMulti, setExpandedMulti] = useState<number | null>(0);
   const [multis, setMultis] = useState<MultiCandidate[]>([]);
   const [diagnostics, setDiagnostics] = useState<OptimizerDiagnostics | null>(null);
@@ -968,6 +1151,97 @@ export default function MultiOptimizerPanel({
     }
   }
 
+  // Round Multi — combination of independently-built Game Blocks, one per
+  // match. `gameRecommendations`/`intelligenceByPlayer` already span every
+  // match in the round when mode === 'roundMulti' (see gameRecommendationsRaw
+  // above), so no separate round-wide data plumbing is needed here.
+  async function fetchRoundGameLogs(recommendations: DisposalLineRecommendation[]): Promise<Map<string, CanonicalGameRow[]>> {
+    const uniquePlayerIds = Array.from(new Set(
+      recommendations
+        .map(rec => rec.safeLine?.player_id ?? rec.safeLine?.resolvedPlayerId ?? rec.playerId)
+        .filter((id): id is string => Boolean(id))
+    ));
+    const entries = await Promise.all(uniquePlayerIds.map(async pid => {
+      const log = await getCanonicalPlayerGameLog(pid, 'disposals');
+      return [pid, log.rows] as const;
+    }));
+    return new Map<string, CanonicalGameRow[]>(entries);
+  }
+
+  async function handleBuildRoundMulti() {
+    if (roundMultiLoading) return;
+    roundMultiCancelRef.current = { cancelled: false };
+    setRoundMultiLoading(true);
+    setRoundMultiError(null);
+    setRoundMultiResult(null);
+
+    try {
+      const currentRecommendations = gameRecommendations.filter(rec => {
+        const fr = rec.safeLine?.freshness;
+        return Boolean(fr && fr.freshnessStatus === 'CURRENT');
+      });
+      const gameLogByPlayerId = await fetchRoundGameLogs(currentRecommendations);
+
+      const games = matches.map(m => ({ matchId: m.id, matchName: matchNames[m.id] ?? `${m.home_team} vs ${m.away_team}` }));
+
+      const result = await buildRoundMulti(ROUND_MULTI_PRESETS[roundMultiPreset], {
+        games,
+        excludedMatchIds: roundMultiExcluded,
+        recommendations: currentRecommendations,
+        intelligenceByPlayerId: intelligenceByPlayer,
+        gameLogByPlayerId,
+        teamEnv: teamEnvMap,
+        roleTrends,
+        cancelRef: roundMultiCancelRef.current,
+        onProgress: () => {},
+      });
+      setRoundMultiResult(result);
+    } catch (e) {
+      setRoundMultiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRoundMultiLoading(false);
+    }
+  }
+
+  async function handleRegenerateGameBlock(matchId: string, matchName: string) {
+    if (!roundMultiResult || regeneratingMatchId) return;
+    setRegeneratingMatchId(matchId);
+    try {
+      const currentRecommendations = gameRecommendations.filter(rec => {
+        const fr = rec.safeLine?.freshness;
+        return Boolean(fr && fr.freshnessStatus === 'CURRENT');
+      });
+      const gameLogByPlayerId = await fetchRoundGameLogs(currentRecommendations);
+
+      const newBlock = await buildGameBlock(ROUND_MULTI_PRESETS[roundMultiPreset], {
+        matchId, matchName,
+        recommendations: currentRecommendations,
+        intelligenceByPlayerId: intelligenceByPlayer,
+        gameLogByPlayerId,
+        teamEnv: teamEnvMap,
+        roleTrends,
+        cancelRef: null,
+        onProgress: () => {},
+      });
+
+      const updatedBlocks = roundMultiResult.blocks.map(b => (b.matchId === matchId ? newBlock : b));
+      setRoundMultiResult(combineGameBlocks(updatedBlocks, roundMultiExcluded));
+    } catch (e) {
+      setRoundMultiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegeneratingMatchId(null);
+    }
+  }
+
+  function handleToggleExcludeGame(matchId: string) {
+    setRoundMultiExcluded(prev => {
+      const next = new Set(prev);
+      if (next.has(matchId)) next.delete(matchId); else next.add(matchId);
+      if (roundMultiResult) setRoundMultiResult(combineGameBlocks(roundMultiResult.blocks, next));
+      return next;
+    });
+  }
+
   // Objective-eligible count — how many players pass the selected recommendation
   // objective's gates (probability, freshness, risk, environment, position,
   // role, intelligence). Replaces the old raw-safeLine-only count, which
@@ -1373,6 +1647,21 @@ export default function MultiOptimizerPanel({
           boost={gameGetUpBoost}
           onBoostChange={setGameGetUpBoost}
           onBuild={handleBuildGameGetUp}
+        />
+      )}
+
+      {mode === 'roundMulti' && (
+        <RoundMultiSection
+          result={roundMultiResult}
+          loading={roundMultiLoading}
+          error={roundMultiError}
+          preset={roundMultiPreset}
+          onPresetChange={setRoundMultiPreset}
+          excludedMatchIds={roundMultiExcluded}
+          regeneratingMatchId={regeneratingMatchId}
+          onBuild={handleBuildRoundMulti}
+          onRegenerate={handleRegenerateGameBlock}
+          onToggleExclude={handleToggleExcludeGame}
         />
       )}
 

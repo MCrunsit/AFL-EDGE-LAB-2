@@ -26,8 +26,9 @@ import {
   type CancellationRef,
 } from './multiOptimizer';
 import { calculateSafetyScore, type FloorBuffer, type SafetyScoreResult } from './safetyScore';
+import { classifyQualityTier, tierOrder, type QualityTier, type TierMetrics, type TierCheckResult } from './multiQualityTiers';
 
-export type QualityTier = 'ELITE' | 'STRONG' | 'ACCEPTABLE' | 'BEST_AVAILABLE';
+export type { QualityTier } from './multiQualityTiers';
 
 export interface GameGetUpLegView {
   leg: OptimizerLeg;
@@ -113,78 +114,39 @@ function weakestByProb(legs: OptimizerLeg[]): OptimizerLeg {
   return legs.reduce((min, l) => (l.adjustedProb < min.adjustedProb ? l : min), legs[0]);
 }
 
-interface TierCheckResult { tier: QualityTier; gapReasons: string[] }
-
 /**
- * Classify a candidate against the four quality tiers, evaluated in order
- * (Elite -> Strong -> Acceptable -> Best Available). Falls through to
- * Best Available rather than ever returning "no qualifying multi" — the
- * spec requires every game with genuine lines to return a recommendation.
+ * Compute the shared TierMetrics from a Game Get-Up candidate's leg views,
+ * then classify via the shared multiQualityTiers module — identical
+ * thresholds to Round Multi's Game Blocks.
  */
 function classifyTier(multi: GameGetUpMulti): TierCheckResult {
   const legViews = multi.legViews;
-  const weakestSafety = multi.minSafetyScore;
-  const avgSafety = multi.avgSafetyScore;
   const minDataConfidence = legViews.reduce<number | null>((min, lv) => {
     if (lv.dataConfidence === null) return min;
     return min === null ? lv.dataConfidence : Math.min(min, lv.dataConfidence);
   }, null);
-  const avgSeasonHitRate = legViews.reduce((s, lv) => s + lv.leg.row.modelProb.hit_rate, 0) / legViews.length;
-  const worstLast10 = Math.min(...legViews.map(lv => lv.leg.last10Hits));
-  const worstLast5 = Math.min(...legViews.map(lv => lv.leg.last5Hits));
   const worstLast5MinMargin = legViews.reduce<number | null>((min, lv) => {
     const m = lv.safety.floorBuffer.last5MinMargin;
     if (m === null) return min;
     return min === null ? m : Math.min(min, m);
   }, null);
-  const hasRoleReduction = legViews.some(lv => lv.leg.roleTrendLabel === 'ROLE_REDUCTION' || lv.leg.roleTrendLabel === 'STRONG_NEGATIVE');
-  const hasHighTagRisk = false; // no genuine tag-risk data source exists — never fabricated as a blocker
-  const hasSignificantNegativeMatchup = legViews.some(lv => lv.leg.row.positionEdgeAdjustment < -0.05);
-  const hasSlightSuppression = legViews.some(lv => lv.leg.row.positionEdgeAdjustment < -0.02 && lv.leg.row.positionEdgeAdjustment >= -0.05);
-  const anyStaleData = legViews.some(lv => lv.leg.row.freshness && lv.leg.row.freshness.freshnessStatus !== 'CURRENT');
 
-  const gaps: string[] = [];
+  const metrics: TierMetrics = {
+    conservativeProbability: multi.conservativeProbability,
+    weakestSafetyScore: multi.minSafetyScore,
+    minDataConfidence,
+    avgSeasonHitRate: legViews.reduce((s, lv) => s + lv.leg.row.modelProb.hit_rate, 0) / legViews.length,
+    worstLast10: Math.min(...legViews.map(lv => lv.leg.last10Hits)),
+    worstLast5: Math.min(...legViews.map(lv => lv.leg.last5Hits)),
+    worstLast5MinMargin,
+    hasRoleReduction: legViews.some(lv => lv.leg.roleTrendLabel === 'ROLE_REDUCTION' || lv.leg.roleTrendLabel === 'STRONG_NEGATIVE'),
+    hasHighTagRisk: false, // no genuine tag-risk data source exists — never fabricated as a blocker
+    hasSignificantNegativeMatchup: legViews.some(lv => lv.leg.row.positionEdgeAdjustment < -0.05),
+    hasSlightSuppression: legViews.some(lv => lv.leg.row.positionEdgeAdjustment < -0.02 && lv.leg.row.positionEdgeAdjustment >= -0.05),
+    anyStaleData: legViews.some(lv => lv.leg.row.freshness && lv.leg.row.freshness.freshnessStatus !== 'CURRENT'),
+  };
 
-  const elitePass =
-    multi.conservativeProbability >= 0.92 &&
-    weakestSafety !== null && weakestSafety >= 88 &&
-    minDataConfidence !== null && minDataConfidence >= 85 &&
-    avgSeasonHitRate >= 0.90 &&
-    worstLast10 >= 9 &&
-    worstLast5 >= 5 &&
-    worstLast5MinMargin !== null && worstLast5MinMargin >= 2 &&
-    !hasRoleReduction && !hasHighTagRisk && !hasSignificantNegativeMatchup && !anyStaleData;
-
-  if (elitePass) return { tier: 'ELITE', gapReasons: [] };
-  if (multi.conservativeProbability < 0.92) gaps.push(`Conservative probability ${(multi.conservativeProbability * 100).toFixed(1)}% below Elite's 92%`);
-  if (weakestSafety === null || weakestSafety < 88) gaps.push('Weakest-leg Safety Score below Elite threshold (88)');
-
-  const strongPass =
-    multi.conservativeProbability >= 0.88 &&
-    weakestSafety !== null && weakestSafety >= 82 &&
-    minDataConfidence !== null && minDataConfidence >= 80 &&
-    avgSeasonHitRate >= 0.85 &&
-    worstLast10 >= 8 &&
-    worstLast5 >= 4 &&
-    (worstLast5MinMargin === null || worstLast5MinMargin >= 0) &&
-    !hasRoleReduction && !hasHighTagRisk && !hasSignificantNegativeMatchup;
-
-  if (strongPass) return { tier: 'STRONG', gapReasons: gaps };
-  if (multi.conservativeProbability < 0.88) gaps.push(`Conservative probability ${(multi.conservativeProbability * 100).toFixed(1)}% below Strong's 88%`);
-  if (weakestSafety === null || weakestSafety < 82) gaps.push('Weakest-leg Safety Score below Strong threshold (82)');
-
-  const acceptablePass =
-    multi.conservativeProbability >= 0.84 &&
-    weakestSafety !== null && weakestSafety >= 75 &&
-    minDataConfidence !== null && minDataConfidence >= 70 &&
-    !hasHighTagRisk && !hasRoleReduction;
-
-  if (acceptablePass) return { tier: 'ACCEPTABLE', gapReasons: gaps };
-  if (multi.conservativeProbability < 0.84) gaps.push(`Conservative probability ${(multi.conservativeProbability * 100).toFixed(1)}% below Acceptable's 84%`);
-  if (weakestSafety === null || weakestSafety < 75) gaps.push('Weakest-leg Safety Score below Acceptable threshold (75)');
-  if (hasSlightSuppression) gaps.push('Contains a slight matchup suppression');
-
-  return { tier: 'BEST_AVAILABLE', gapReasons: gaps };
+  return classifyQualityTier(metrics);
 }
 
 /**
@@ -195,8 +157,7 @@ function classifyTier(multi: GameGetUpMulti): TierCheckResult {
  * target odds. Implemented as a lexicographic comparator.
  */
 function compareGameGetUpCandidates(a: GameGetUpMulti, b: GameGetUpMulti): number {
-  const tierOrder: Record<QualityTier, number> = { ELITE: 0, STRONG: 1, ACCEPTABLE: 2, BEST_AVAILABLE: 3 };
-  if (tierOrder[a.tier] !== tierOrder[b.tier]) return tierOrder[a.tier] - tierOrder[b.tier];
+  if (tierOrder(a.tier) !== tierOrder(b.tier)) return tierOrder(a.tier) - tierOrder(b.tier);
   if (a.conservativeProbability !== b.conservativeProbability) return b.conservativeProbability - a.conservativeProbability;
   const aMinSafety = a.minSafetyScore ?? -1;
   const bMinSafety = b.minSafetyScore ?? -1;

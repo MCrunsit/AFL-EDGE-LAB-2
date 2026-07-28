@@ -4,7 +4,7 @@ import { getSelectionReason, getLast10Hits, getLast5Hits, getLast10HitRate } fro
 import type { TeamEnvironmentMap } from './teamStatsService';
 import type { RoleTrendMap } from './roleTrendService';
 
-export type OptimizerPreset = 'gameMulti' | 'roundMulti' | 'sameGame' | 'gameGetUp';
+export type OptimizerPreset = 'gameMulti' | 'roundMulti' | 'sameGame' | 'gameGetUp' | 'gameBlock';
 
 export interface MultiOptimizerSettings {
   preset: OptimizerPreset;
@@ -17,6 +17,11 @@ export interface MultiOptimizerSettings {
   maxLegsPerMatch: number;
   disposalsOnly: boolean;
   maxPoolSize: number;
+  /** Only used by the 'gameBlock' preset — its ascending leg-count search
+   * range (e.g. minLegs 1, maxLegs 3 searches 1-leg, then 2-leg, then 3-leg
+   * combos in that order, never forcing more legs than needed). */
+  minLegs?: number;
+  maxLegs?: number;
 }
 
 export const GAME_MULTI_PRESET: MultiOptimizerSettings = {
@@ -253,7 +258,7 @@ function calculateMultiScore(
     weakestLeg: Math.round(weakestLegScore * 15 * 100) / 100,
     recentConsistency: Math.round(recentConsistency * 15 * 100) / 100,
     seasonConsistency: Math.round(seasonConsistency * 10 * 100) / 100,
-    matchDiversity: (settings.preset === 'gameMulti' || settings.preset === 'gameGetUp') ? 0 : Math.round(matchDiversity * 5 * 100) / 100,
+    matchDiversity: (settings.preset === 'gameMulti' || settings.preset === 'gameGetUp' || settings.preset === 'gameBlock') ? 0 : Math.round(matchDiversity * 5 * 100) / 100,
     ev: Math.round(combinedEVScore * 5 * 100) / 100,
   };
 
@@ -281,9 +286,9 @@ function calculateMultiScore(
       if (count > 1) warnings.push(`${count} legs from same match: ${legs.find(l => l.matchId === match)?.matchName}`);
     }
   }
-  // For gameMulti/gameGetUp, all legs are from the same match by design — no
-  // same-match penalty, but add a correlation warning
-  if (hasSameMatch && (settings.preset === 'gameMulti' || settings.preset === 'gameGetUp')) {
+  // For gameMulti/gameGetUp/gameBlock, all legs are from the same match by
+  // design — no same-match penalty, but add a correlation warning
+  if (hasSameMatch && (settings.preset === 'gameMulti' || settings.preset === 'gameGetUp' || settings.preset === 'gameBlock')) {
     warnings.push('All legs from same match — probability may be overstated due to correlation');
   }
 
@@ -333,6 +338,9 @@ function finalizeMulti(
   }
   if (settings.preset === 'gameGetUp') {
     if (legs.length < 2 || legs.length > 4) return null;
+  }
+  if (settings.preset === 'gameBlock') {
+    if (legs.length < (settings.minLegs ?? 1) || legs.length > (settings.maxLegs ?? 3)) return null;
   }
 
   const combinedOdds = legs.reduce((product, leg) => product * leg.odds, 1);
@@ -481,6 +489,9 @@ function buildCandidate(
   }
   if (settings.preset === 'gameGetUp') {
     if (combo.length < 2 || combo.length > 4) return null;
+  }
+  if (settings.preset === 'gameBlock') {
+    if (combo.length < (settings.minLegs ?? 1) || combo.length > (settings.maxLegs ?? 3)) return null;
   }
 
   // Hard constraints
@@ -690,7 +701,12 @@ export async function runCandidateSearchAsync(
     ? [2]
     : settings.preset === 'gameGetUp'
       ? [2, 3, 4] // safest-first: try 2 legs before ever considering 3 or 4
-      : [settings.preferredLegs, settings.fallbackLegs];
+      : settings.preset === 'gameBlock'
+        ? Array.from(
+            { length: (settings.maxLegs ?? 3) - (settings.minLegs ?? 1) + 1 },
+            (_, i) => (settings.minLegs ?? 1) + i,
+          ) // smallest-first: never force more legs than needed for a safe block
+        : [settings.preferredLegs, settings.fallbackLegs];
 
   for (const k of searchSizes) {
     if (stoppedBy || cancelRef?.cancelled) break;
