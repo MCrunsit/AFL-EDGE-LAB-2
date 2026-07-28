@@ -27,7 +27,6 @@ import {
   type MultiOptimizerSettings,
   type OptimizedMulti,
   type OptimizerLeg,
-  type OptimizerDiagnostics,
   type OptimizerProgress,
   type CancellationRef,
 } from './multiOptimizer';
