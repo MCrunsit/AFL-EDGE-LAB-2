@@ -28,6 +28,7 @@ import {
   buildRoundMulti, buildGameBlock, combineGameBlocks, ROUND_MULTI_PRESETS,
   type RoundMultiPresetName, type RoundMultiResult, type GameBlock, type GameBlockLegView,
 } from '../lib/roundMulti';
+import type { CorrelationMethod } from '../lib/correlationModel';
 import {
   evaluateRecommendationObjective, OBJECTIVE_LABELS, DEFAULT_OBJECTIVE_THRESHOLDS,
   type RecommendationObjective, type ObjectiveEvaluation, type ObjectiveThresholds,
@@ -274,6 +275,14 @@ function tierLabel(tier: QualityTier): string {
   }
 }
 
+function correlationMethodLabel(method: CorrelationMethod): string {
+  switch (method) {
+    case 'historical': return 'Historical correlation (real shared-game data)';
+    case 'flat_fallback': return 'Conservative flat adjustment — insufficient shared-game history';
+    case 'mixed': return 'Mixed — some pairs use historical correlation, others a conservative flat fallback';
+  }
+}
+
 function GameGetUpLegRow({ view }: { view: GameGetUpLegView }) {
   const { leg, safety, dataConfidence, intelligenceScore } = view;
   const fb = safety.floorBuffer;
@@ -333,7 +342,7 @@ function GameGetUpMultiCard({ multi, boost }: { multi: GameGetUpMulti; boost: nu
       </div>
       <div className="p-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] border-b border-gray-800">
         <span className="text-gray-400" title="Independent product of each leg's own probability, before any correlation adjustment.">Raw probability: <span className="text-white font-semibold">{(multi.rawProbability * 100).toFixed(1)}%</span></span>
-        <span className="text-gray-400" title="Flat same-match correlation haircut applied — not a fitted historical correlation model yet.">Correlation adjustment: <span className="text-white font-semibold">-{(multi.correlationAdjustment * 100).toFixed(1)}%</span></span>
+        <span className="text-gray-400" title={correlationMethodLabel(multi.correlationMethod)}>Correlation adjustment: <span className="text-white font-semibold">-{(multi.correlationAdjustment * 100).toFixed(1)}%</span></span>
         <span className="text-gray-400" title="Raw probability after the correlation adjustment — the conservative estimate used for tiering.">Conservative probability: <span className="text-white font-semibold">{(multi.conservativeProbability * 100).toFixed(1)}%</span></span>
         <span className="text-gray-400">Avg Safety Score: <span className="text-white font-semibold">{multi.avgSafetyScore ?? '—'}</span></span>
         <span className="text-gray-400">Min Safety Score: <span className="text-white font-semibold">{multi.minSafetyScore ?? '—'}</span></span>
@@ -341,6 +350,7 @@ function GameGetUpMultiCard({ multi, boost }: { multi: GameGetUpMulti; boost: nu
         <span className="text-gray-400">Avg Data Confidence: <span className="text-white font-semibold">{multi.avgDataConfidence ?? '—'}%</span></span>
         <span className="text-gray-400">Weakest leg: <span className="text-white font-semibold">{multi.weakestLeg.playerName}</span></span>
       </div>
+      <p className="px-3 pt-2 text-[9px] text-gray-500">{correlationMethodLabel(multi.correlationMethod)}</p>
       {multi.tierGapReasons.length > 0 && (
         <div className="px-3 py-2 border-b border-gray-800 bg-gray-950/50">
           <p className="text-[10px] text-amber-400 font-semibold uppercase mb-1">Why not the tier above</p>
@@ -534,11 +544,14 @@ function GameBlockCard({
       ) : (
         <>
           <div className="p-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] border-b border-gray-800">
+            <span className="text-gray-400" title="Independent product of each leg's own probability, before any correlation adjustment.">Raw probability: <span className="text-white font-semibold">{(block.rawProbability * 100).toFixed(1)}%</span></span>
+            <span className="text-gray-400" title={correlationMethodLabel(block.correlationMethod)}>Correlation adjustment: <span className="text-white font-semibold">-{(block.correlationAdjustment * 100).toFixed(1)}%</span></span>
             <span className="text-gray-400">Conservative probability: <span className="text-white font-semibold">{(block.conservativeProbability * 100).toFixed(1)}%</span></span>
             <span className="text-gray-400">Avg Safety Score: <span className="text-white font-semibold">{block.avgSafetyScore ?? '—'}</span></span>
             <span className="text-gray-400">Min Safety Score: <span className="text-white font-semibold">{block.minSafetyScore ?? '—'}</span></span>
             <span className="text-gray-400">Avg Data Confidence: <span className="text-white font-semibold">{block.avgDataConfidence ?? '—'}%</span></span>
           </div>
+          <p className="px-3 pt-2 text-[9px] text-gray-500">{correlationMethodLabel(block.correlationMethod)}</p>
           {block.tierGapReasons.length > 0 && (
             <div className="px-3 py-2 border-b border-gray-800 bg-gray-950/50">
               <p className="text-[10px] text-amber-400 font-semibold uppercase mb-1">Why not the tier above</p>

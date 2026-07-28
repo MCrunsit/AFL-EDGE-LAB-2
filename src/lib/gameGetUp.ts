@@ -27,6 +27,7 @@ import {
 } from './multiOptimizer';
 import { calculateSafetyScore, type FloorBuffer, type SafetyScoreResult } from './safetyScore';
 import { classifyQualityTier, tierOrder, type QualityTier, type TierMetrics, type TierCheckResult } from './multiQualityTiers';
+import { applyRealCorrelationAdjustment, type CorrelationMethod } from './correlationModel';
 
 export type { QualityTier } from './multiQualityTiers';
 
@@ -47,7 +48,8 @@ export interface GameGetUpMulti {
   legViews: GameGetUpLegView[];
   combinedOdds: number;
   rawProbability: number;
-  correlationAdjustment: number; // fraction removed by the flat same-game haircut, e.g. 0.05
+  correlationAdjustment: number; // fraction removed — historical when enough shared-game data exists, else a conservative flat fallback per pair
+  correlationMethod: CorrelationMethod;
   conservativeProbability: number;
   estimatedEV: number;
   tier: QualityTier;
@@ -192,17 +194,19 @@ function toGameGetUpMulti(
   const weakestLegView = legViews.find(lv => lv.leg === weakestLeg) ?? legViews[0];
 
   const rawProbability = multi.rawProbability;
-  const conservativeProbability = multi.conservativeProbability;
-  const correlationAdjustment = rawProbability > 0 ? 1 - conservativeProbability / rawProbability : 0;
+  const realCorrelation = applyRealCorrelationAdjustment(multi.legs, rawProbability, gameLogByPlayerId);
+  const conservativeProbability = realCorrelation.conservativeProbability;
+  const estimatedEV = conservativeProbability * multi.combinedOdds - 1;
 
   const draft: GameGetUpMulti = {
     legs: multi.legs,
     legViews,
     combinedOdds: multi.combinedOdds,
     rawProbability,
-    correlationAdjustment,
+    correlationAdjustment: realCorrelation.correlationAdjustment,
+    correlationMethod: realCorrelation.method,
     conservativeProbability,
-    estimatedEV: multi.estimatedEV,
+    estimatedEV,
     tier: 'BEST_AVAILABLE',
     tierGapReasons: [],
     avgSafetyScore,

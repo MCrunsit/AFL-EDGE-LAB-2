@@ -33,6 +33,7 @@ import {
 } from './multiOptimizer';
 import { calculateSafetyScore, type FloorBuffer, type SafetyScoreResult } from './safetyScore';
 import { classifyQualityTier, tierOrder, type QualityTier, type TierMetrics } from './multiQualityTiers';
+import { applyRealCorrelationAdjustment, type CorrelationMethod } from './correlationModel';
 
 export interface GameBlockSettings {
   minLegsPerGame: number;
@@ -97,6 +98,7 @@ export interface GameBlock {
   combinedOdds: number;
   rawProbability: number;
   correlationAdjustment: number;
+  correlationMethod: CorrelationMethod;
   conservativeProbability: number;
   tier: QualityTier;
   tierGapReasons: string[];
@@ -221,7 +223,7 @@ export async function buildGameBlock(settings: GameBlockSettings, inputs: GameBl
   if (valid.length === 0) {
     return {
       matchId, matchName, legs: [], legViews: [], combinedOdds: 0, rawProbability: 0,
-      correlationAdjustment: 0, conservativeProbability: 0, tier: 'BEST_AVAILABLE',
+      correlationAdjustment: 0, correlationMethod: 'historical', conservativeProbability: 0, tier: 'BEST_AVAILABLE',
       tierGapReasons: [], avgSafetyScore: null, minSafetyScore: null, avgDataConfidence: null,
       weakestLeg: null as unknown as OptimizerLeg, weakestFloorBuffer: {
         last5MinMargin: null, last10MinMargin: null, medianMargin: null, avgMargin: null,
@@ -239,8 +241,9 @@ export async function buildGameBlock(settings: GameBlockSettings, inputs: GameBl
     const minSafetyScore = safetyScores.length > 0 ? Math.min(...safetyScores) : null;
     const confs = legViews.map(lv => lv.dataConfidence).filter((c): c is number => c !== null);
     const avgDataConfidence = confs.length > 0 ? Math.round(confs.reduce((a, b) => a + b, 0) / confs.length) : null;
-    const { tier, gapReasons } = classifyBlockTier(legViews, multi.conservativeProbability, minSafetyScore);
-    return { multi, legViews, avgSafetyScore, minSafetyScore, avgDataConfidence, tier, gapReasons };
+    const realCorrelation = applyRealCorrelationAdjustment(multi.legs, multi.rawProbability, gameLogByPlayerId);
+    const { tier, gapReasons } = classifyBlockTier(legViews, realCorrelation.conservativeProbability, minSafetyScore);
+    return { multi, legViews, avgSafetyScore, minSafetyScore, avgDataConfidence, tier, gapReasons, realCorrelation };
   });
 
   // Prefer the best tier, then fewest legs (never pad), then highest
@@ -249,14 +252,13 @@ export async function buildGameBlock(settings: GameBlockSettings, inputs: GameBl
   scored.sort((a, b) => {
     if (tierOrder(a.tier) !== tierOrder(b.tier)) return tierOrder(a.tier) - tierOrder(b.tier);
     if (a.multi.legs.length !== b.multi.legs.length) return a.multi.legs.length - b.multi.legs.length;
-    if (a.multi.conservativeProbability !== b.multi.conservativeProbability) return b.multi.conservativeProbability - a.multi.conservativeProbability;
+    if (a.realCorrelation.conservativeProbability !== b.realCorrelation.conservativeProbability) return b.realCorrelation.conservativeProbability - a.realCorrelation.conservativeProbability;
     return a.multi.combinedOdds - b.multi.combinedOdds;
   });
 
   const best = scored[0];
   const weakestLeg = weakestByProb(best.multi.legs);
   const weakestLegView = best.legViews.find(lv => lv.leg === weakestLeg) ?? best.legViews[0];
-  const correlationAdjustment = best.multi.rawProbability > 0 ? 1 - best.multi.conservativeProbability / best.multi.rawProbability : 0;
 
   return {
     matchId, matchName,
@@ -264,8 +266,9 @@ export async function buildGameBlock(settings: GameBlockSettings, inputs: GameBl
     legViews: best.legViews,
     combinedOdds: best.multi.combinedOdds,
     rawProbability: best.multi.rawProbability,
-    correlationAdjustment,
-    conservativeProbability: best.multi.conservativeProbability,
+    correlationAdjustment: best.realCorrelation.correlationAdjustment,
+    correlationMethod: best.realCorrelation.method,
+    conservativeProbability: best.realCorrelation.conservativeProbability,
     tier: best.tier,
     tierGapReasons: best.gapReasons,
     avgSafetyScore: best.avgSafetyScore,
