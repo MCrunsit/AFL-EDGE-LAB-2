@@ -22,6 +22,7 @@ import MatchupDebugPage from './pages/MatchupDebugPage';
 import DataFreshnessAuditPage from './pages/DataFreshnessAuditPage';
 import SampleAuditPage from './pages/SampleAuditPage';
 import MissingStatsRepairPage from './pages/MissingStatsRepairPage';
+import ModelReviewPage from './pages/ModelReviewPage';
 
 export default function App() {
   return (
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="/data-freshness" element={<DataFreshnessAuditPage />} />
           <Route path="/sample-audit" element={<SampleAuditPage />} />
           <Route path="/missing-stats-repair" element={<MissingStatsRepairPage />} />
+          <Route path="/model-review" element={<ErrorBoundary fallbackLabel="Model Review crashed."><ModelReviewPage /></ErrorBoundary>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>

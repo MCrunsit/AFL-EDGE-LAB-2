@@ -369,6 +369,117 @@ export async function getCanonicalPlayerGameLog(
 }
 
 /**
+ * Leakage-safe variant of getCanonicalPlayerGameLog for probability
+ * calibration backfill: returns only games strictly BEFORE asOfDate,
+ * instead of everything up to today. Used to recompute what the model
+ * would genuinely have predicted before a given match, without using any
+ * information that wasn't yet available at that time.
+ *
+ * Deliberately simpler than getCanonicalPlayerGameLog (no gap detection,
+ * no window pre-computation) — calibration only needs the raw ordered
+ * stat-value history, which it feeds into the existing calculateModelProb.
+ * Does not touch or call the existing function.
+ */
+export async function getCanonicalPlayerGameLogAsOf(
+  playerId: string,
+  stat: CanonicalStat,
+  asOfDate: string,
+  maxRows = 40,
+): Promise<{ rows: CanonicalGameRow[]; seasonRows: CanonicalGameRow[]; season: number }> {
+  const { data: raw, error } = await supabase
+    .from('player_game_stats')
+    .select(`
+      player_id,
+      match_id,
+      match_date,
+      team,
+      opponent,
+      venue,
+      disposals,
+      marks,
+      tackles,
+      goals,
+      hitouts,
+      matches:match_id (
+        season,
+        round,
+        venue,
+        home_team,
+        away_team
+      )
+    `)
+    .eq('player_id', playerId)
+    .not('match_date', 'is', null)
+    .lt('match_date', asOfDate) // strictly before — the match being predicted must never leak in
+    .order('match_date', { ascending: false });
+
+  const season = inferSeason(null, asOfDate);
+
+  if (error || !raw) {
+    return { rows: [], seasonRows: [], season };
+  }
+
+  interface RawRow {
+    player_id: string;
+    match_id: string | null;
+    match_date: string | null;
+    team: string | null;
+    opponent: string | null;
+    venue: string | null;
+    disposals: number | null;
+    marks: number | null;
+    tackles: number | null;
+    goals: number | null;
+    hitouts: number | null;
+    matches: { season: number | null; round: string | null; venue: string | null; home_team: string | null; away_team: string | null } | null;
+  }
+
+  const enriched: CanonicalGameRow[] = [];
+  const seenMatchIds = new Set<string>();
+
+  for (const r of raw as unknown as RawRow[]) {
+    if (!r.match_date) continue;
+    if (r.match_id) {
+      if (seenMatchIds.has(r.match_id)) continue;
+      seenMatchIds.add(r.match_id);
+    }
+
+    const matchInfo = r.matches;
+    const rowSeason = inferSeason(matchInfo?.season, r.match_date);
+    const round = matchInfo?.round ?? null;
+
+    const statRaw = r[stat as keyof typeof r];
+    if (statRaw === null || statRaw === undefined) continue;
+    const statValue = Number(statRaw);
+    if (isNaN(statValue)) continue;
+
+    enriched.push({
+      player_id: r.player_id,
+      match_id: r.match_id,
+      match_date: r.match_date,
+      round,
+      round_num: parseRoundNum(round),
+      season: rowSeason,
+      team: r.team,
+      opponent: r.opponent,
+      venue: r.venue || matchInfo?.venue || null,
+      disposals: Number(r.disposals) || 0,
+      marks: Number(r.marks) || 0,
+      tackles: Number(r.tackles) || 0,
+      goals: Number(r.goals) || 0,
+      hitouts: Number(r.hitouts) || 0,
+      statValue,
+    });
+  }
+
+  enriched.sort((a, b) => (a.match_date > b.match_date ? -1 : a.match_date < b.match_date ? 1 : 0));
+  const rows = enriched.slice(0, maxRows);
+  const seasonRows = rows.filter(r => r.season === season);
+
+  return { rows, seasonRows, season };
+}
+
+/**
  * Compute window hit counts given a game log and a betting line.
  * This is what callers use to get actual hit rates for model calculation.
  */

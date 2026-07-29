@@ -4,7 +4,7 @@ import { getSelectionReason, getLast10Hits, getLast5Hits, getLast10HitRate } fro
 import type { TeamEnvironmentMap } from './teamStatsService';
 import type { RoleTrendMap } from './roleTrendService';
 
-export type OptimizerPreset = 'gameMulti' | 'roundMulti' | 'sameGame';
+export type OptimizerPreset = 'gameMulti' | 'roundMulti' | 'sameGame' | 'gameGetUp' | 'gameBlock';
 
 export interface MultiOptimizerSettings {
   preset: OptimizerPreset;
@@ -17,6 +17,11 @@ export interface MultiOptimizerSettings {
   maxLegsPerMatch: number;
   disposalsOnly: boolean;
   maxPoolSize: number;
+  /** Only used by the 'gameBlock' preset — its ascending leg-count search
+   * range (e.g. minLegs 1, maxLegs 3 searches 1-leg, then 2-leg, then 3-leg
+   * combos in that order, never forcing more legs than needed). */
+  minLegs?: number;
+  maxLegs?: number;
 }
 
 export const GAME_MULTI_PRESET: MultiOptimizerSettings = {
@@ -56,6 +61,24 @@ export const SAME_GAME_PRESET: MultiOptimizerSettings = {
   maxLegsPerMatch: 2,
   disposalsOnly: true,
   maxPoolSize: 30,
+};
+
+// Game Get-Up: small, very safe player multis for one match. Prefers 2 legs,
+// only adds a 3rd/4th when needed to reach a qualifying quality tier — see
+// gameGetUp.ts, which layers tiering/relaxation/selection on top of this
+// preset's search results rather than reusing multiOptimizer.ts's generic
+// gameMulti/roundMulti label-selection logic.
+export const GAME_GETUP_PRESET: MultiOptimizerSettings = {
+  preset: 'gameGetUp',
+  targetOdds: 1.675,
+  preferredMinOdds: 1.60,
+  preferredMaxOdds: 1.75,
+  hardMaxOdds: 2.00,
+  preferredLegs: 2,
+  fallbackLegs: 2,
+  maxLegsPerMatch: 4,
+  disposalsOnly: true,
+  maxPoolSize: 40,
 };
 
 export const DEFAULT_OPTIMIZER_SETTINGS: MultiOptimizerSettings = GAME_MULTI_PRESET;
@@ -235,7 +258,7 @@ function calculateMultiScore(
     weakestLeg: Math.round(weakestLegScore * 15 * 100) / 100,
     recentConsistency: Math.round(recentConsistency * 15 * 100) / 100,
     seasonConsistency: Math.round(seasonConsistency * 10 * 100) / 100,
-    matchDiversity: settings.preset === 'gameMulti' ? 0 : Math.round(matchDiversity * 5 * 100) / 100,
+    matchDiversity: (settings.preset === 'gameMulti' || settings.preset === 'gameGetUp' || settings.preset === 'gameBlock') ? 0 : Math.round(matchDiversity * 5 * 100) / 100,
     ev: Math.round(combinedEVScore * 5 * 100) / 100,
   };
 
@@ -263,9 +286,9 @@ function calculateMultiScore(
       if (count > 1) warnings.push(`${count} legs from same match: ${legs.find(l => l.matchId === match)?.matchName}`);
     }
   }
-  // For gameMulti, all legs are from the same match by design — no same-match penalty
-  // but add a correlation warning
-  if (hasSameMatch && settings.preset === 'gameMulti') {
+  // For gameMulti/gameGetUp/gameBlock, all legs are from the same match by
+  // design — no same-match penalty, but add a correlation warning
+  if (hasSameMatch && (settings.preset === 'gameMulti' || settings.preset === 'gameGetUp' || settings.preset === 'gameBlock')) {
     warnings.push('All legs from same match — probability may be overstated due to correlation');
   }
 
@@ -312,6 +335,12 @@ function finalizeMulti(
   }
   if (settings.preset === 'sameGame') {
     if (legs.length !== 2) return null;
+  }
+  if (settings.preset === 'gameGetUp') {
+    if (legs.length < 2 || legs.length > 4) return null;
+  }
+  if (settings.preset === 'gameBlock') {
+    if (legs.length < (settings.minLegs ?? 1) || legs.length > (settings.maxLegs ?? 3)) return null;
   }
 
   const combinedOdds = legs.reduce((product, leg) => product * leg.odds, 1);
@@ -458,6 +487,12 @@ function buildCandidate(
   if (settings.preset === 'sameGame') {
     if (combo.length !== 2) return null;
   }
+  if (settings.preset === 'gameGetUp') {
+    if (combo.length < 2 || combo.length > 4) return null;
+  }
+  if (settings.preset === 'gameBlock') {
+    if (combo.length < (settings.minLegs ?? 1) || combo.length > (settings.maxLegs ?? 3)) return null;
+  }
 
   // Hard constraints
   const combinedOdds = combo.reduce((acc, l) => acc * l.odds, 1);
@@ -577,7 +612,15 @@ async function searchCombinations(
   return { candidates, checked, stoppedBy };
 }
 
-export async function runMultiOptimizerAsync(
+/**
+ * Shared search core: builds the leg pool, runs the DFS across the preset's
+ * leg-count sizes, dedupes and validates candidates. Returns every valid
+ * candidate found (unlabeled, unselected) so callers can apply their own
+ * ranking/labeling on top — used by runMultiOptimizerAsync below (existing
+ * gameMulti/roundMulti/sameGame label-selection) and by gameGetUp.ts (its
+ * own tiering/relaxation/selection), without duplicating the DFS.
+ */
+export async function runCandidateSearchAsync(
   recommendations: DisposalLineRecommendation[],
   settings: MultiOptimizerSettings,
   cancelRef: CancellationRef | null,
@@ -585,7 +628,7 @@ export async function runMultiOptimizerAsync(
   matchNames: Record<string, string> = {},
   teamEnv?: TeamEnvironmentMap,
   roleTrends?: RoleTrendMap,
-): Promise<{ multis: OptimizedMulti[]; diagnostics: OptimizerDiagnostics }> {
+): Promise<{ valid: OptimizedMulti[]; diagnostics: OptimizerDiagnostics }> {
   const startTime = Date.now();
   const validationErrors: string[] = [];
 
@@ -642,7 +685,7 @@ export async function runMultiOptimizerAsync(
   if (poolLegs.length === 0) {
     diagnostics.runtimeMs = Date.now() - startTime;
     onProgress({ phase: 'done', safePlayerLines: 0, combinationsChecked: 0, candidatesFound: 0 });
-    return { multis: [], diagnostics };
+    return { valid: [], diagnostics };
   }
 
   const pool = poolLegs.slice(0, settings.maxPoolSize);
@@ -656,7 +699,14 @@ export async function runMultiOptimizerAsync(
 
   const searchSizes = settings.preset === 'sameGame'
     ? [2]
-    : [settings.preferredLegs, settings.fallbackLegs];
+    : settings.preset === 'gameGetUp'
+      ? [2, 3, 4] // safest-first: try 2 legs before ever considering 3 or 4
+      : settings.preset === 'gameBlock'
+        ? Array.from(
+            { length: (settings.maxLegs ?? 3) - (settings.minLegs ?? 1) + 1 },
+            (_, i) => (settings.minLegs ?? 1) + i,
+          ) // smallest-first: never force more legs than needed for a safe block
+        : [settings.preferredLegs, settings.fallbackLegs];
 
   for (const k of searchSizes) {
     if (stoppedBy || cancelRef?.cancelled) break;
@@ -705,6 +755,33 @@ export async function runMultiOptimizerAsync(
   diagnostics.candidatesInPreferredRange = valid.filter(m =>
     m.combinedOdds >= settings.preferredMinOdds && m.combinedOdds <= settings.preferredMaxOdds
   ).length;
+
+  diagnostics.stoppedByLimit = stoppedBy;
+  diagnostics.runtimeMs = Date.now() - startTime;
+
+  onProgress({ phase: 'done', safePlayerLines: pool.length, combinationsChecked: diagnostics.fourLegCombinationsChecked + diagnostics.threeLegCombinationsChecked + diagnostics.twoLegCombinationsChecked, candidatesFound: valid.length });
+
+  return { valid, diagnostics };
+}
+
+/**
+ * Backward-compatible wrapper preserving the existing behavior for
+ * gameMulti/roundMulti/sameGame: runs the shared search core, then applies
+ * the original fixed 5-label selection. gameGetUp uses runCandidateSearchAsync
+ * directly (see gameGetUp.ts) with its own tiering/selection instead.
+ */
+export async function runMultiOptimizerAsync(
+  recommendations: DisposalLineRecommendation[],
+  settings: MultiOptimizerSettings,
+  cancelRef: CancellationRef | null,
+  onProgress: (p: OptimizerProgress) => void,
+  matchNames: Record<string, string> = {},
+  teamEnv?: TeamEnvironmentMap,
+  roleTrends?: RoleTrendMap,
+): Promise<{ multis: OptimizedMulti[]; diagnostics: OptimizerDiagnostics }> {
+  const { valid, diagnostics } = await runCandidateSearchAsync(
+    recommendations, settings, cancelRef, onProgress, matchNames, teamEnv, roleTrends,
+  );
 
   const fourLegs = valid.filter(m => m.legs.length === 4);
   const threeLegs = valid.filter(m => m.legs.length === 3);
@@ -762,10 +839,6 @@ export async function runMultiOptimizerAsync(
   }
 
   diagnostics.finalMultisReturned = merged.length;
-  diagnostics.stoppedByLimit = stoppedBy;
-  diagnostics.runtimeMs = Date.now() - startTime;
-
-  onProgress({ phase: 'done', safePlayerLines: pool.length, combinationsChecked: diagnostics.fourLegCombinationsChecked + diagnostics.threeLegCombinationsChecked + diagnostics.twoLegCombinationsChecked, candidatesFound: merged.length });
 
   return { multis: merged, diagnostics };
 }

@@ -22,6 +22,13 @@ import type { TeamFullStats } from '../lib/teamMatchAggregation';
 import {
   computePlayerIntelligence, getSharedPositionEdgeCache, type PlayerIntelligence,
 } from '../lib/playerIntelligenceService';
+import { buildGameGetUp, applyBoost, type GameGetUpResult, type GameGetUpMulti, type GameGetUpLegView, type QualityTier } from '../lib/gameGetUp';
+import { getCanonicalPlayerGameLog, type CanonicalGameRow } from '../lib/canonicalGameLog';
+import {
+  buildRoundMulti, buildGameBlock, combineGameBlocks, ROUND_MULTI_PRESETS,
+  type RoundMultiPresetName, type RoundMultiResult, type GameBlock, type GameBlockLegView,
+} from '../lib/roundMulti';
+import type { CorrelationMethod } from '../lib/correlationModel';
 import {
   evaluateRecommendationObjective, OBJECTIVE_LABELS, DEFAULT_OBJECTIVE_THRESHOLDS,
   type RecommendationObjective, type ObjectiveEvaluation, type ObjectiveThresholds,
@@ -234,15 +241,410 @@ function IntelBadges({ intel, onClick }: { intel: PlayerIntelligence | undefined
       <span className={`text-[9px] px-1.5 py-0.5 rounded ${roleBadgeColor(intel.roleIntelligence.label)}`}>
         Role: {roleBadgeText(intel.roleIntelligence.label)}
       </span>
-      <span className={`text-[9px] px-1.5 py-0.5 rounded ${scoreBadgeColor(intel.intelligenceLabel)}`}>
+      <span
+        className={`text-[9px] px-1.5 py-0.5 rounded ${scoreBadgeColor(intel.intelligenceLabel)}`}
+        title="Intelligence Score: contextual matchup/role score. NOT a hit probability."
+      >
         {intel.intelligenceScore !== null ? `Intel: ${intel.intelligenceScore} ${intel.intelligenceLabel}` : 'Intel: Unrated'}
       </span>
-      {intel.dataConfidence !== null && (
-        <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">
-          Conf: {Math.round(intel.dataConfidence * 100)}%
-        </span>
-      )}
+      <span
+        className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500"
+        title="Data Confidence: how complete/fresh/reliable the underlying data is. NOT a win chance — a high Data Confidence does not mean a high chance of hitting the line."
+      >
+        Data Confidence: {intel.dataConfidence}%
+      </span>
     </button>
+  );
+}
+
+function tierColor(tier: QualityTier): string {
+  switch (tier) {
+    case 'ELITE': return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40';
+    case 'STRONG': return 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40';
+    case 'ACCEPTABLE': return 'bg-amber-500/20 text-amber-400 border-amber-500/40';
+    case 'BEST_AVAILABLE': return 'bg-gray-700/40 text-gray-300 border-gray-600/50';
+  }
+}
+
+function tierLabel(tier: QualityTier): string {
+  switch (tier) {
+    case 'ELITE': return 'Elite Get-Up';
+    case 'STRONG': return 'Strong Get-Up';
+    case 'ACCEPTABLE': return 'Acceptable Get-Up';
+    case 'BEST_AVAILABLE': return 'Best Available';
+  }
+}
+
+function correlationMethodLabel(method: CorrelationMethod): string {
+  switch (method) {
+    case 'historical': return 'Historical correlation (real shared-game data)';
+    case 'flat_fallback': return 'Conservative flat adjustment — insufficient shared-game history';
+    case 'mixed': return 'Mixed — some pairs use historical correlation, others a conservative flat fallback';
+  }
+}
+
+function GameGetUpLegRow({ view }: { view: GameGetUpLegView }) {
+  const { leg, safety, dataConfidence, intelligenceScore } = view;
+  const fb = safety.floorBuffer;
+  return (
+    <div className="p-3 border-t border-gray-800 first:border-t-0">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-white font-medium text-sm">{leg.playerName}</span>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-cyan-400">Disposals {leg.displayLabel ?? `${leg.line}+`}</span>
+          <span className="text-white font-bold">${leg.odds.toFixed(2)}</span>
+        </div>
+      </div>
+      <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+        <span title="The estimated probability this player clears the line." className="text-gray-400">
+          Adjusted Hit Probability: <span className="text-white font-semibold">{(leg.adjustedProb * 100).toFixed(0)}%</span>
+        </span>
+        <span title="0-100 score of consistency, downside protection and floor strength. NOT a hit probability." className="text-gray-400">
+          Safety Score: <span className="text-white font-semibold">{safety.score ?? 'Unrated'}</span>
+        </span>
+        <span title="0-100 contextual score (matchup, role, environment). NOT a hit probability." className="text-gray-400">
+          Intelligence Score: <span className="text-white font-semibold">{intelligenceScore ?? 'Unrated'}</span>
+        </span>
+        <span title="Data completeness/freshness/reliability, 0-100%. NOT a win chance." className="text-gray-400">
+          Data Confidence: <span className="text-white font-semibold">{dataConfidence ?? '—'}%</span>
+        </span>
+      </div>
+      {fb.sampleSize > 0 && (
+        <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-x-2 gap-y-0.5 text-[10px] text-gray-500">
+          <span>Last-5 min margin: {fb.last5MinMargin ?? '—'}</span>
+          <span>Last-10 min margin: {fb.last10MinMargin ?? '—'}</span>
+          <span>Median margin: {fb.medianMargin?.toFixed(1) ?? '—'}</span>
+          <span>Avg margin: {fb.avgMargin?.toFixed(1) ?? '—'}</span>
+          <span>10th pct margin: {fb.p10Margin?.toFixed(1) ?? '—'}</span>
+          <span>Exactly on line: {fb.timesExactlyOnLine}</span>
+          <span>One above line: {fb.timesOneAboveLine}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameGetUpMultiCard({ multi, boost }: { multi: GameGetUpMulti; boost: number }) {
+  const boostedOdds = applyBoost(multi.combinedOdds, boost);
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+      <div className="p-3 flex items-center justify-between flex-wrap gap-2 border-b border-gray-800">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${tierColor(multi.tier)}`}>{tierLabel(multi.tier)}</span>
+          {multi.labels.map(l => (
+            <span key={l} className="text-[10px] px-2 py-0.5 rounded bg-gray-800 text-gray-400">{l}</span>
+          ))}
+        </div>
+        <div className="text-right">
+          <p className="text-white font-bold text-sm">${multi.combinedOdds.toFixed(2)} <span className="text-gray-500 font-normal">pre-boost</span></p>
+          {boost !== 1 && <p className="text-amber-400 text-xs font-semibold">${boostedOdds.toFixed(2)} boosted (payout only)</p>}
+        </div>
+      </div>
+      <div className="p-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] border-b border-gray-800">
+        <span className="text-gray-400" title="Independent product of each leg's own probability, before any correlation adjustment.">Raw probability: <span className="text-white font-semibold">{(multi.rawProbability * 100).toFixed(1)}%</span></span>
+        <span className="text-gray-400" title={correlationMethodLabel(multi.correlationMethod)}>Correlation adjustment: <span className="text-white font-semibold">-{(multi.correlationAdjustment * 100).toFixed(1)}%</span></span>
+        <span className="text-gray-400" title="Raw probability after the correlation adjustment — the conservative estimate used for tiering.">Conservative probability: <span className="text-white font-semibold">{(multi.conservativeProbability * 100).toFixed(1)}%</span></span>
+        <span className="text-gray-400">Avg Safety Score: <span className="text-white font-semibold">{multi.avgSafetyScore ?? '—'}</span></span>
+        <span className="text-gray-400">Min Safety Score: <span className="text-white font-semibold">{multi.minSafetyScore ?? '—'}</span></span>
+        <span className="text-gray-400">Avg Intelligence: <span className="text-white font-semibold">{multi.avgIntelligenceScore ?? '—'}</span></span>
+        <span className="text-gray-400">Avg Data Confidence: <span className="text-white font-semibold">{multi.avgDataConfidence ?? '—'}%</span></span>
+        <span className="text-gray-400">Weakest leg: <span className="text-white font-semibold">{multi.weakestLeg.playerName}</span></span>
+      </div>
+      <p className="px-3 pt-2 text-[9px] text-gray-500">{correlationMethodLabel(multi.correlationMethod)}</p>
+      {multi.tierGapReasons.length > 0 && (
+        <div className="px-3 py-2 border-b border-gray-800 bg-gray-950/50">
+          <p className="text-[10px] text-amber-400 font-semibold uppercase mb-1">Why not the tier above</p>
+          {multi.tierGapReasons.map((r, i) => <p key={i} className="text-[10px] text-gray-400">{r}</p>)}
+        </div>
+      )}
+      {multi.warnings.length > 0 && (
+        <div className="px-3 py-2 border-b border-gray-800">
+          {multi.warnings.map((w, i) => <p key={i} className="text-[10px] text-amber-400 flex items-center gap-1"><AlertCircle className="w-2.5 h-2.5" /> {w}</p>)}
+        </div>
+      )}
+      <div>
+        {multi.legViews.map((lv, i) => <GameGetUpLegRow key={i} view={lv} />)}
+      </div>
+      <p className="px-3 py-2 text-[9px] text-gray-600 border-t border-gray-800">Decision support only — no leg or multi is guaranteed.</p>
+    </div>
+  );
+}
+
+function GameGetUpSection({
+  selectedMatchId, result, loading, error, boost, onBoostChange, onBuild,
+}: {
+  selectedMatchId: string | null;
+  result: GameGetUpResult | null;
+  loading: boolean;
+  error: string | null;
+  boost: number;
+  onBoostChange: (b: number) => void;
+  onBuild: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="bg-gray-900 border border-amber-500/20 rounded-xl p-4">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h3 className="text-white font-semibold text-sm">Game Get-Up</h3>
+            <p className="text-gray-500 text-xs">A small number of very safe player legs for this game. Target $1.60-$1.75, 2 legs preferred, 4 only when necessary.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="text-[10px] text-gray-500 uppercase" title="Boost changes payout only — it never changes the estimated hit probability.">Boost</label>
+            <input
+              type="number" min={1} max={3} step={0.01} value={boost}
+              onChange={e => onBoostChange(Math.max(1, Number(e.target.value) || 1))}
+              className="w-20 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1"
+            />
+            <button
+              onClick={onBuild}
+              disabled={!selectedMatchId || loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-gray-950 text-xs font-bold rounded-lg transition"
+            >
+              {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Award className="w-3.5 h-3.5" />}
+              Build Safest Multi
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {!selectedMatchId && <p className="text-xs text-gray-500 px-1">Choose a match above to build a Game Get-Up multi.</p>}
+      {error && <p className="text-xs text-red-400 px-1">{error}</p>}
+
+      {result && result.noGenuineLinesAvailable && (
+        <p className="text-xs text-amber-400 px-1">No genuine bookmaker disposal lines are available for this match yet.</p>
+      )}
+
+      {result && !result.noGenuineLinesAvailable && (
+        <div className="space-y-3">
+          {result.primarySafest && (
+            <div>
+              <p className="text-[10px] text-amber-400 uppercase font-semibold mb-1 px-1">Primary Safest Multi</p>
+              <GameGetUpMultiCard multi={result.primarySafest} boost={boost} />
+            </div>
+          )}
+          {result.targetRangeMulti && !result.targetRangeMulti.labels.includes('Primary Safest Multi') && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1 px-1">Target $1.60-$1.75 Multi</p>
+              <GameGetUpMultiCard multi={result.targetRangeMulti} boost={boost} />
+            </div>
+          )}
+          {result.shorterPricedAlternative && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1 px-1">Shorter-Priced Safer Alternative</p>
+              <GameGetUpMultiCard multi={result.shorterPricedAlternative} boost={boost} />
+            </div>
+          )}
+          {result.higherPricedAlternative && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1 px-1">Higher-Priced Alternative</p>
+              <GameGetUpMultiCard multi={result.higherPricedAlternative} boost={boost} />
+            </div>
+          )}
+          {result.safestTwoLeg && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1 px-1">Safest Two-Leg Combination</p>
+              <GameGetUpMultiCard multi={result.safestTwoLeg} boost={boost} />
+            </div>
+          )}
+          {result.safestThreeLeg && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1 px-1">Safest Three-Leg Combination</p>
+              <GameGetUpMultiCard multi={result.safestThreeLeg} boost={boost} />
+            </div>
+          )}
+          {result.bestAvailable && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1 px-1">Best Available Option</p>
+              <GameGetUpMultiCard multi={result.bestAvailable} boost={boost} />
+            </div>
+          )}
+          {result.safestSingleLeg && (
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1 px-1">Safest Individual Leg</p>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <GameGetUpLegRow view={result.safestSingleLeg} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameBlockLegRow({ view }: { view: GameBlockLegView }) {
+  const { leg, safety, dataConfidence, intelligenceScore } = view;
+  const fb = safety.floorBuffer;
+  return (
+    <div className="p-3 border-t border-gray-800 first:border-t-0">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-white font-medium text-sm">{leg.playerName}</span>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-cyan-400">Disposals {leg.displayLabel ?? `${leg.line}+`}</span>
+          <span className="text-white font-bold">${leg.odds.toFixed(2)}</span>
+        </div>
+      </div>
+      <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+        <span className="text-gray-400">Adjusted Hit Probability: <span className="text-white font-semibold">{(leg.adjustedProb * 100).toFixed(0)}%</span></span>
+        <span className="text-gray-400">Safety Score: <span className="text-white font-semibold">{safety.score ?? 'Unrated'}</span></span>
+        <span className="text-gray-400">Intelligence Score: <span className="text-white font-semibold">{intelligenceScore ?? 'Unrated'}</span></span>
+        <span className="text-gray-400">Data Confidence: <span className="text-white font-semibold">{dataConfidence ?? '—'}%</span></span>
+      </div>
+      {fb.sampleSize > 0 && (
+        <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-x-2 gap-y-0.5 text-[10px] text-gray-500">
+          <span>Last-5 min margin: {fb.last5MinMargin ?? '—'}</span>
+          <span>Last-10 min margin: {fb.last10MinMargin ?? '—'}</span>
+          <span>Median margin: {fb.medianMargin?.toFixed(1) ?? '—'}</span>
+          <span>10th pct margin: {fb.p10Margin?.toFixed(1) ?? '—'}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameBlockCard({
+  block, isExcluded, isRegenerating, onRegenerate, onToggleExclude,
+}: {
+  block: GameBlock;
+  isExcluded: boolean;
+  isRegenerating: boolean;
+  onRegenerate: () => void;
+  onToggleExclude: () => void;
+}) {
+  return (
+    <div className={`bg-gray-900 border rounded-xl overflow-hidden ${isExcluded ? 'border-gray-800 opacity-50' : 'border-gray-800'}`}>
+      <div className="p-3 flex items-center justify-between flex-wrap gap-2 border-b border-gray-800">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${tierColor(block.tier)}`}>{tierLabel(block.tier)}</span>
+          <span className="text-sm text-white font-semibold">{block.matchName}</span>
+          {isExcluded && <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-400">Excluded</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-white font-bold text-sm">${block.combinedOdds > 0 ? block.combinedOdds.toFixed(2) : '—'}</span>
+          <button
+            onClick={onRegenerate}
+            disabled={isRegenerating}
+            className="text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded transition"
+          >
+            {isRegenerating ? <Loader2 className="w-3 h-3 animate-spin inline" /> : 'Regenerate'}
+          </button>
+          <button
+            onClick={onToggleExclude}
+            className={`text-[10px] px-2 py-1 rounded transition ${isExcluded ? 'bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30' : 'bg-red-500/10 text-red-400 hover:bg-red-500/20'}`}
+          >
+            {isExcluded ? 'Restore' : 'Exclude'}
+          </button>
+        </div>
+      </div>
+      {block.noGenuineLinesAvailable ? (
+        <p className="text-xs text-amber-400 p-3">No genuine bookmaker disposal lines available for this match yet.</p>
+      ) : block.legs.length === 0 ? (
+        <p className="text-xs text-gray-500 p-3">No qualifying legs found for this match under the current settings.</p>
+      ) : (
+        <>
+          <div className="p-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] border-b border-gray-800">
+            <span className="text-gray-400" title="Independent product of each leg's own probability, before any correlation adjustment.">Raw probability: <span className="text-white font-semibold">{(block.rawProbability * 100).toFixed(1)}%</span></span>
+            <span className="text-gray-400" title={correlationMethodLabel(block.correlationMethod)}>Correlation adjustment: <span className="text-white font-semibold">-{(block.correlationAdjustment * 100).toFixed(1)}%</span></span>
+            <span className="text-gray-400">Conservative probability: <span className="text-white font-semibold">{(block.conservativeProbability * 100).toFixed(1)}%</span></span>
+            <span className="text-gray-400">Avg Safety Score: <span className="text-white font-semibold">{block.avgSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Min Safety Score: <span className="text-white font-semibold">{block.minSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Avg Data Confidence: <span className="text-white font-semibold">{block.avgDataConfidence ?? '—'}%</span></span>
+          </div>
+          <p className="px-3 pt-2 text-[9px] text-gray-500">{correlationMethodLabel(block.correlationMethod)}</p>
+          {block.tierGapReasons.length > 0 && (
+            <div className="px-3 py-2 border-b border-gray-800 bg-gray-950/50">
+              <p className="text-[10px] text-amber-400 font-semibold uppercase mb-1">Why not the tier above</p>
+              {block.tierGapReasons.map((r, i) => <p key={i} className="text-[10px] text-gray-400">{r}</p>)}
+            </div>
+          )}
+          <div>
+            {block.legViews.map((lv, i) => <GameBlockLegRow key={i} view={lv} />)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RoundMultiSection({
+  result, loading, error, preset, onPresetChange, excludedMatchIds, regeneratingMatchId,
+  onBuild, onRegenerate, onToggleExclude,
+}: {
+  result: RoundMultiResult | null;
+  loading: boolean;
+  error: string | null;
+  preset: RoundMultiPresetName;
+  onPresetChange: (p: RoundMultiPresetName) => void;
+  excludedMatchIds: Set<string>;
+  regeneratingMatchId: string | null;
+  onBuild: () => void;
+  onRegenerate: (matchId: string, matchName: string) => void;
+  onToggleExclude: (matchId: string) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h3 className="text-white font-semibold text-sm">Round Multi</h3>
+            <p className="text-gray-500 text-xs">A safe Game Block from each match in the round, combined into one multi. Total odds are expected to run high — that's not an error.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={preset}
+              onChange={e => onPresetChange(e.target.value as RoundMultiPresetName)}
+              className="bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1.5"
+            >
+              <option value="FULL_ROUND_STANDARD">Full Round — Standard</option>
+              <option value="FULL_ROUND_SAFEST">Full Round — Safest</option>
+              <option value="ONE_LEG_PER_GAME">One Leg From Every Game</option>
+            </select>
+            <button
+              onClick={onBuild}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-bold rounded-lg transition"
+            >
+              {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+              Build Round Multi
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {error && <p className="text-xs text-red-400 px-1">{error}</p>}
+
+      {result && (
+        <>
+          <div className="bg-gray-900 border border-cyan-500/20 rounded-xl p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <span className="text-gray-400">Games represented: <span className="text-white font-bold">{result.gamesRepresented}</span></span>
+            <span className="text-gray-400">Total legs: <span className="text-white font-bold">{result.totalLegs}</span></span>
+            <span className="text-gray-400">Total odds: <span className="text-white font-bold">${result.totalOdds.toFixed(2)}</span></span>
+            <span className="text-gray-400">Conservative probability: <span className="text-white font-bold">{(result.conservativeProbability * 100).toFixed(2)}%</span></span>
+            <span className="text-gray-400">Avg Safety Score: <span className="text-white font-bold">{result.avgSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Min Safety Score: <span className="text-white font-bold">{result.minSafetyScore ?? '—'}</span></span>
+            <span className="text-gray-400">Weakest leg: <span className="text-white font-bold">{result.weakestLeg?.playerName ?? '—'}</span></span>
+            <span className="text-gray-400">Weakest Game Block: <span className="text-white font-bold">{result.weakestGameBlock?.matchName ?? '—'}</span></span>
+          </div>
+          {result.gamesWithRelaxedRequirements.length > 0 && (
+            <p className="text-[10px] text-amber-400 px-1">Relaxed requirements applied in: {result.gamesWithRelaxedRequirements.join(', ')}</p>
+          )}
+          <div className="space-y-2">
+            {result.blocks.map(block => (
+              <GameBlockCard
+                key={block.matchId}
+                block={block}
+                isExcluded={excludedMatchIds.has(block.matchId)}
+                isRegenerating={regeneratingMatchId === block.matchId}
+                onRegenerate={() => onRegenerate(block.matchId, block.matchName)}
+                onToggleExclude={() => onToggleExclude(block.matchId)}
+              />
+            ))}
+          </div>
+          <p className="px-1 text-[9px] text-gray-600">Decision support only — no leg, Game Block, or Round Multi is guaranteed.</p>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -252,8 +654,20 @@ export default function MultiOptimizerPanel({
   possessionProfiles, positionPossessionAverages, teamFullStats,
   onResultsChange,
 }: Props) {
-  const [mode, setMode] = useState<'gameMulti' | 'roundMulti'>('gameMulti');
+  const [mode, setMode] = useState<'gameGetUp' | 'gameMulti' | 'roundMulti'>('gameGetUp');
   const [settings, setSettings] = useState<MultiOptimizerSettings>(GAME_MULTI_PRESET);
+  const [gameGetUpResult, setGameGetUpResult] = useState<GameGetUpResult | null>(null);
+  const [gameGetUpLoading, setGameGetUpLoading] = useState(false);
+  const [gameGetUpError, setGameGetUpError] = useState<string | null>(null);
+  const [gameGetUpBoost, setGameGetUpBoost] = useState(1.0);
+  const gameGetUpCancelRef = useRef<CancellationRef>({ cancelled: false });
+  const [roundMultiPreset, setRoundMultiPreset] = useState<RoundMultiPresetName>('FULL_ROUND_STANDARD');
+  const [roundMultiResult, setRoundMultiResult] = useState<RoundMultiResult | null>(null);
+  const [roundMultiLoading, setRoundMultiLoading] = useState(false);
+  const [roundMultiError, setRoundMultiError] = useState<string | null>(null);
+  const [roundMultiExcluded, setRoundMultiExcluded] = useState<Set<string>>(new Set());
+  const [regeneratingMatchId, setRegeneratingMatchId] = useState<string | null>(null);
+  const roundMultiCancelRef = useRef<CancellationRef>({ cancelled: false });
   const [expandedMulti, setExpandedMulti] = useState<number | null>(0);
   const [multis, setMultis] = useState<MultiCandidate[]>([]);
   const [diagnostics, setDiagnostics] = useState<OptimizerDiagnostics | null>(null);
@@ -319,7 +733,7 @@ export default function MultiOptimizerPanel({
 
   // Load saved exclusions when the selected match changes
   useEffect(() => {
-    if (selectedMatchId && mode === 'gameMulti') {
+    if (selectedMatchId && (mode === 'gameMulti' || mode === 'gameGetUp')) {
       setExcludedPlayers(getExcludedPlayers(selectedMatchId));
     } else {
       setExcludedPlayers([]);
@@ -333,10 +747,12 @@ export default function MultiOptimizerPanel({
     setSwapCandidates(null);
   }, [selectedMatchId, mode]);
 
-  function switchMode(newMode: 'gameMulti' | 'roundMulti') {
+  function switchMode(newMode: 'gameGetUp' | 'gameMulti' | 'roundMulti') {
     setMode(newMode);
-    setSettings(newMode === 'gameMulti' ? GAME_MULTI_PRESET : ROUND_MULTI_PRESET);
-    setStaleResults(multis.length > 0);
+    if (newMode !== 'gameGetUp') {
+      setSettings(newMode === 'gameMulti' ? GAME_MULTI_PRESET : ROUND_MULTI_PRESET);
+      setStaleResults(multis.length > 0);
+    }
   }
 
   // Filter recommendations for the selected match in gameMulti mode
@@ -368,7 +784,7 @@ export default function MultiOptimizerPanel({
   }, [recommendations]);
 
   const gameRecommendationsRaw =
-    mode === 'gameMulti' && selectedMatchId
+    (mode === 'gameMulti' || mode === 'gameGetUp') && selectedMatchId
       ? validRecommendations.filter(
           recommendation =>
             recommendation.matchId === selectedMatchId
@@ -701,6 +1117,142 @@ export default function MultiOptimizerPanel({
 
   function handleCancel() {
     cancelRef.current.cancelled = true;
+  }
+
+  async function handleBuildGameGetUp() {
+    if (gameGetUpLoading || !selectedMatchId) return;
+    gameGetUpCancelRef.current = { cancelled: false };
+    setGameGetUpLoading(true);
+    setGameGetUpError(null);
+    setGameGetUpResult(null);
+
+    try {
+      // Current data only, per Game Get-Up defaults — a stale line is never
+      // a genuinely safe basis for the safest-available multi.
+      const currentRecommendations = gameRecommendations.filter(rec => {
+        const fr = rec.safeLine?.freshness;
+        return Boolean(fr && fr.freshnessStatus === 'CURRENT');
+      });
+
+      const uniquePlayerIds = Array.from(new Set(
+        currentRecommendations
+          .map(rec => rec.safeLine?.player_id ?? rec.safeLine?.resolvedPlayerId ?? rec.playerId)
+          .filter((id): id is string => Boolean(id))
+      ));
+
+      const gameLogEntries = await Promise.all(uniquePlayerIds.map(async pid => {
+        const log = await getCanonicalPlayerGameLog(pid, 'disposals');
+        return [pid, log.rows] as const;
+      }));
+      const gameLogByPlayerId = new Map<string, CanonicalGameRow[]>(gameLogEntries);
+
+      const result = await buildGameGetUp({
+        recommendations: currentRecommendations,
+        intelligenceByPlayerId: intelligenceByPlayer,
+        gameLogByPlayerId,
+        matchNames,
+        teamEnv: teamEnvMap,
+        roleTrends,
+        cancelRef: gameGetUpCancelRef.current,
+        onProgress: () => {},
+      });
+      setGameGetUpResult(result);
+    } catch (e) {
+      setGameGetUpError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGameGetUpLoading(false);
+    }
+  }
+
+  // Round Multi — combination of independently-built Game Blocks, one per
+  // match. `gameRecommendations`/`intelligenceByPlayer` already span every
+  // match in the round when mode === 'roundMulti' (see gameRecommendationsRaw
+  // above), so no separate round-wide data plumbing is needed here.
+  async function fetchRoundGameLogs(recommendations: DisposalLineRecommendation[]): Promise<Map<string, CanonicalGameRow[]>> {
+    const uniquePlayerIds = Array.from(new Set(
+      recommendations
+        .map(rec => rec.safeLine?.player_id ?? rec.safeLine?.resolvedPlayerId ?? rec.playerId)
+        .filter((id): id is string => Boolean(id))
+    ));
+    const entries = await Promise.all(uniquePlayerIds.map(async pid => {
+      const log = await getCanonicalPlayerGameLog(pid, 'disposals');
+      return [pid, log.rows] as const;
+    }));
+    return new Map<string, CanonicalGameRow[]>(entries);
+  }
+
+  async function handleBuildRoundMulti() {
+    if (roundMultiLoading) return;
+    roundMultiCancelRef.current = { cancelled: false };
+    setRoundMultiLoading(true);
+    setRoundMultiError(null);
+    setRoundMultiResult(null);
+
+    try {
+      const currentRecommendations = gameRecommendations.filter(rec => {
+        const fr = rec.safeLine?.freshness;
+        return Boolean(fr && fr.freshnessStatus === 'CURRENT');
+      });
+      const gameLogByPlayerId = await fetchRoundGameLogs(currentRecommendations);
+
+      const games = matches.map(m => ({ matchId: m.id, matchName: matchNames[m.id] ?? `${m.home_team} vs ${m.away_team}` }));
+
+      const result = await buildRoundMulti(ROUND_MULTI_PRESETS[roundMultiPreset], {
+        games,
+        excludedMatchIds: roundMultiExcluded,
+        recommendations: currentRecommendations,
+        intelligenceByPlayerId: intelligenceByPlayer,
+        gameLogByPlayerId,
+        teamEnv: teamEnvMap,
+        roleTrends,
+        cancelRef: roundMultiCancelRef.current,
+        onProgress: () => {},
+      });
+      setRoundMultiResult(result);
+    } catch (e) {
+      setRoundMultiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRoundMultiLoading(false);
+    }
+  }
+
+  async function handleRegenerateGameBlock(matchId: string, matchName: string) {
+    if (!roundMultiResult || regeneratingMatchId) return;
+    setRegeneratingMatchId(matchId);
+    try {
+      const currentRecommendations = gameRecommendations.filter(rec => {
+        const fr = rec.safeLine?.freshness;
+        return Boolean(fr && fr.freshnessStatus === 'CURRENT');
+      });
+      const gameLogByPlayerId = await fetchRoundGameLogs(currentRecommendations);
+
+      const newBlock = await buildGameBlock(ROUND_MULTI_PRESETS[roundMultiPreset], {
+        matchId, matchName,
+        recommendations: currentRecommendations,
+        intelligenceByPlayerId: intelligenceByPlayer,
+        gameLogByPlayerId,
+        teamEnv: teamEnvMap,
+        roleTrends,
+        cancelRef: null,
+        onProgress: () => {},
+      });
+
+      const updatedBlocks = roundMultiResult.blocks.map(b => (b.matchId === matchId ? newBlock : b));
+      setRoundMultiResult(combineGameBlocks(updatedBlocks, roundMultiExcluded));
+    } catch (e) {
+      setRoundMultiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegeneratingMatchId(null);
+    }
+  }
+
+  function handleToggleExcludeGame(matchId: string) {
+    setRoundMultiExcluded(prev => {
+      const next = new Set(prev);
+      if (next.has(matchId)) next.delete(matchId); else next.add(matchId);
+      if (roundMultiResult) setRoundMultiResult(combineGameBlocks(roundMultiResult.blocks, next));
+      return next;
+    });
   }
 
   // Objective-eligible count — how many players pass the selected recommendation
@@ -1065,6 +1617,10 @@ export default function MultiOptimizerPanel({
 
       {/* Mode selector */}
       <div className="flex gap-2">
+        <button onClick={() => switchMode('gameGetUp')}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition ${mode === 'gameGetUp' ? 'bg-amber-500 text-gray-950' : 'bg-gray-800 text-gray-400 hover:text-white'}`}>
+          <Award className="w-3.5 h-3.5" /> Game Get-Up
+        </button>
         <button onClick={() => switchMode('gameMulti')}
           className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition ${mode === 'gameMulti' ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}>
           <Target className="w-3.5 h-3.5" /> Game Multi
@@ -1075,7 +1631,53 @@ export default function MultiOptimizerPanel({
         </button>
       </div>
 
-      {/* Match selector for Game Multi mode */}
+      {/* Match selector — shared by Game Get-Up and Game Multi mode */}
+      {mode === 'gameGetUp' && (
+        <div className="bg-gray-900 border border-amber-500/20 rounded-xl p-4">
+          <label className="text-xs text-gray-500 uppercase tracking-wider block mb-2">Choose Match</label>
+          <select
+            value={selectedMatchId ?? ''}
+            onChange={e => { onSelectMatch(e.target.value); setGameGetUpResult(null); }}
+            className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-2"
+          >
+            <option value="">Select a match…</option>
+            {matches.map(m => (
+              <option key={m.id} value={m.id}>{m.home_team} vs {m.away_team}</option>
+            ))}
+          </select>
+          <div className="mt-2 text-xs text-gray-500">
+            Selected game: <span className="text-white font-medium">{selectedMatchName}</span>
+          </div>
+        </div>
+      )}
+
+      {mode === 'gameGetUp' && (
+        <GameGetUpSection
+          selectedMatchId={selectedMatchId}
+          result={gameGetUpResult}
+          loading={gameGetUpLoading}
+          error={gameGetUpError}
+          boost={gameGetUpBoost}
+          onBoostChange={setGameGetUpBoost}
+          onBuild={handleBuildGameGetUp}
+        />
+      )}
+
+      {mode === 'roundMulti' && (
+        <RoundMultiSection
+          result={roundMultiResult}
+          loading={roundMultiLoading}
+          error={roundMultiError}
+          preset={roundMultiPreset}
+          onPresetChange={setRoundMultiPreset}
+          excludedMatchIds={roundMultiExcluded}
+          regeneratingMatchId={regeneratingMatchId}
+          onBuild={handleBuildRoundMulti}
+          onRegenerate={handleRegenerateGameBlock}
+          onToggleExclude={handleToggleExcludeGame}
+        />
+      )}
+
       {mode === 'gameMulti' && (
         <div className="bg-gray-900 border border-emerald-500/20 rounded-xl p-4">
           <label className="text-xs text-gray-500 uppercase tracking-wider block mb-2">Choose Match</label>
@@ -1163,6 +1765,8 @@ export default function MultiOptimizerPanel({
         </div>
       )}
 
+      {mode !== 'gameGetUp' && (
+      <>
       {/* Profile + Line Safety */}
       <div className="bg-gray-900 border border-emerald-500/20 rounded-xl p-4">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -1966,6 +2570,8 @@ export default function MultiOptimizerPanel({
             </div>
           )}
         </div>
+      )}
+      </>
       )}
 
       {drawerPlayerId && (

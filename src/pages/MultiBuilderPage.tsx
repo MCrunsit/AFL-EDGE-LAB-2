@@ -302,8 +302,11 @@ export default function MultiBuilderPage() {
     );
   }
 
-  function getTagRiskExclusion(_playerId: string): { excluded: boolean; reason?: string; tagRiskLevel?: string; taggedBy?: string; tagType?: string } {
-    return { excluded: false };
+  // No genuine tag-risk data source exists yet (no tag_risk table, no import
+  // pipeline) — this honestly reports data as unavailable rather than
+  // fabricating a risk level or silently passing every player as "checked".
+  function getTagRiskExclusion(_playerId: string): { excluded: boolean; dataAvailable: boolean; reason?: string; tagRiskLevel?: string; taggedBy?: string; tagType?: string } {
+    return { excluded: false, dataAvailable: false };
   }
 
   useEffect(() => {
@@ -1448,17 +1451,18 @@ export default function MultiBuilderPage() {
             <Shield className="w-3 h-3" />
             Tag Risk Exclusions
           </h5>
+          <p className="text-[10px] text-amber-500">Tag risk data unavailable — no genuine tag-risk data source is connected yet, so these toggles do not currently exclude anyone.</p>
           <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
             <input type="checkbox" checked={avoidHighTagRisk} onChange={e => setAvoidHighTagRisk(e.target.checked)} className="accent-red-500" />
             <Shield className="w-3 h-3 text-red-400" />
             Avoid High Tag Risk Players
-            <span className="text-gray-600">(default: ON)</span>
+            <span className="text-gray-600">(default: ON, data unavailable)</span>
           </label>
           <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
             <input type="checkbox" checked={avoidModerateTagRisk} onChange={e => setAvoidModerateTagRisk(e.target.checked)} className="accent-amber-500" />
             <AlertTriangle className="w-3 h-3 text-amber-400" />
             Avoid Moderate Tag Risk Players
-            <span className="text-gray-600">(default: OFF)</span>
+            <span className="text-gray-600">(default: OFF, data unavailable)</span>
           </label>
         </div>
         </>
