@@ -79,6 +79,8 @@ export const GAME_GETUP_PRESET: MultiOptimizerSettings = {
   maxLegsPerMatch: 4,
   disposalsOnly: true,
   maxPoolSize: 40,
+  minLegs: 2,
+  maxLegs: 4,
 };
 
 export const DEFAULT_OPTIMIZER_SETTINGS: MultiOptimizerSettings = GAME_MULTI_PRESET;
@@ -337,7 +339,7 @@ function finalizeMulti(
     if (legs.length !== 2) return null;
   }
   if (settings.preset === 'gameGetUp') {
-    if (legs.length < 2 || legs.length > 4) return null;
+    if (legs.length < (settings.minLegs ?? 2) || legs.length > (settings.maxLegs ?? 4)) return null;
   }
   if (settings.preset === 'gameBlock') {
     if (legs.length < (settings.minLegs ?? 1) || legs.length > (settings.maxLegs ?? 3)) return null;
@@ -488,7 +490,7 @@ function buildCandidate(
     if (combo.length !== 2) return null;
   }
   if (settings.preset === 'gameGetUp') {
-    if (combo.length < 2 || combo.length > 4) return null;
+    if (combo.length < (settings.minLegs ?? 2) || combo.length > (settings.maxLegs ?? 4)) return null;
   }
   if (settings.preset === 'gameBlock') {
     if (combo.length < (settings.minLegs ?? 1) || combo.length > (settings.maxLegs ?? 3)) return null;
@@ -700,7 +702,10 @@ export async function runCandidateSearchAsync(
   const searchSizes = settings.preset === 'sameGame'
     ? [2]
     : settings.preset === 'gameGetUp'
-      ? [2, 3, 4] // safest-first: try 2 legs before ever considering 3 or 4
+      ? Array.from(
+          { length: (settings.maxLegs ?? 4) - (settings.minLegs ?? 2) + 1 },
+          (_, i) => (settings.minLegs ?? 2) + i,
+        ) // safest-first: smallest leg count tried before ever considering more
       : settings.preset === 'gameBlock'
         ? Array.from(
             { length: (settings.maxLegs ?? 3) - (settings.minLegs ?? 1) + 1 },

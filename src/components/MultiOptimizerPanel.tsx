@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { Target, Award, AlertCircle, Loader2, X, RefreshCw, ChevronDown, ChevronRight, Zap, AlertTriangle, Wrench, Check, UserX, Search, ArrowUpDown, ListPlus, Info, Plus, Wand2 } from 'lucide-react';
 import type { MultiCandidate, OptimizerDiagnostics, OptimizerProgress, MultiOptimizerSettings, CancellationRef } from '../lib/multiOptimizer';
-import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, applyCorrelationHaircut } from '../lib/multiOptimizer';
+import { runMultiOptimizerAsync, GAME_MULTI_PRESET, ROUND_MULTI_PRESET, GAME_GETUP_PRESET, applyCorrelationHaircut } from '../lib/multiOptimizer';
 import type { DisposalLineRecommendation } from '../lib/disposalLineSelector';
 import type { LineSafetyMode } from '../lib/disposalLineSelector';
 import type { TeamEnvironmentMap, TeamMatchupEnvironment, TeamDisposalStats } from '../lib/teamStatsService';
@@ -661,6 +661,17 @@ export default function MultiOptimizerPanel({
   const [gameGetUpError, setGameGetUpError] = useState<string | null>(null);
   const [gameGetUpBoost, setGameGetUpBoost] = useState(1.0);
   const gameGetUpCancelRef = useRef<CancellationRef>({ cancelled: false });
+  // User-adjustable Game Get-Up settings — starts at GAME_GETUP_PRESET's
+  // defaults but editable live, so tuning the pool/odds range doesn't
+  // require a code change every time.
+  const [gameGetUpSettings, setGameGetUpSettings] = useState({
+    minLegs: GAME_GETUP_PRESET.minLegs ?? 2,
+    maxLegs: GAME_GETUP_PRESET.maxLegs ?? 4,
+    preferredMinOdds: GAME_GETUP_PRESET.preferredMinOdds,
+    preferredMaxOdds: GAME_GETUP_PRESET.preferredMaxOdds,
+    hardMaxOdds: GAME_GETUP_PRESET.hardMaxOdds,
+  });
+  const [showGameGetUpSettings, setShowGameGetUpSettings] = useState(false);
   const [roundMultiPreset, setRoundMultiPreset] = useState<RoundMultiPresetName>('FULL_ROUND_STANDARD');
   const [roundMultiResult, setRoundMultiResult] = useState<RoundMultiResult | null>(null);
   const [roundMultiLoading, setRoundMultiLoading] = useState(false);
@@ -1012,7 +1023,7 @@ export default function MultiOptimizerPanel({
 
   // Unique players from the recommendations for the selected match — for the exclusion UI
   const matchPlayers = useMemo(() => {
-    if (mode !== 'gameMulti' || !selectedMatchId) return [];
+    if ((mode !== 'gameMulti' && mode !== 'gameGetUp') || !selectedMatchId) return [];
     const seen = new Map<string, { playerId: string; playerName: string; team: string }>();
     for (const recommendation of gameRecommendationsRaw) {
       const row = recommendation?.row;
@@ -1153,6 +1164,15 @@ export default function MultiOptimizerPanel({
         matchNames,
         teamEnv: teamEnvMap,
         roleTrends,
+        settings: {
+          minLegs: gameGetUpSettings.minLegs,
+          maxLegs: gameGetUpSettings.maxLegs,
+          maxLegsPerMatch: gameGetUpSettings.maxLegs,
+          preferredMinOdds: gameGetUpSettings.preferredMinOdds,
+          preferredMaxOdds: gameGetUpSettings.preferredMaxOdds,
+          hardMaxOdds: gameGetUpSettings.hardMaxOdds,
+          targetOdds: (gameGetUpSettings.preferredMinOdds + gameGetUpSettings.preferredMaxOdds) / 2,
+        },
         cancelRef: gameGetUpCancelRef.current,
         onProgress: () => {},
       });
@@ -1647,6 +1667,151 @@ export default function MultiOptimizerPanel({
           </select>
           <div className="mt-2 text-xs text-gray-500">
             Selected game: <span className="text-white font-medium">{selectedMatchName}</span>
+          </div>
+
+          {/* Excluded Players — same exclusion mechanism Game Multi uses;
+              gameRecommendations already filters on it, this just exposes
+              the controls in Game Get-Up mode too. */}
+          <div className="mt-3 border-t border-gray-700/50 pt-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <button
+                onClick={() => setShowExclusionPanel(s => !s)}
+                className="flex items-center gap-1.5 text-xs font-medium text-gray-400 hover:text-gray-300"
+              >
+                <UserX className="w-3.5 h-3.5" />
+                Excluded Players
+                {excludedPlayers.length > 0 && (
+                  <span className="text-xs text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded">
+                    {excludedPlayers.length}
+                  </span>
+                )}
+              </button>
+              <div className="flex items-center gap-2">
+                {excludedPlayers.length > 0 && (
+                  <button
+                    onClick={handleClearExclusions}
+                    className="text-[10px] px-2 py-0.5 bg-gray-700 text-gray-400 border border-gray-600 rounded hover:bg-gray-600 transition"
+                  >
+                    Clear All
+                  </button>
+                )}
+                {showExclusionPanel ? <ChevronDown className="w-3 h-3 text-gray-500" /> : <ChevronRight className="w-3 h-3 text-gray-500" />}
+              </div>
+            </div>
+            {showExclusionPanel && (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  placeholder="Search players from this match..."
+                  value={exclusionSearch}
+                  onChange={e => setExclusionSearch(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-white placeholder-gray-600"
+                />
+                <div className="max-h-48 overflow-y-auto space-y-0.5">
+                  {filteredMatchPlayers.map(p => {
+                    const isExcluded = excludedPlayerIds.has(p.playerId);
+                    return (
+                      <label
+                        key={p.playerId}
+                        className={`flex items-center gap-2 px-2 py-1.5 rounded text-xs cursor-pointer transition ${
+                          isExcluded ? 'bg-red-500/10 text-red-400' : 'hover:bg-gray-800/60 text-gray-300'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isExcluded}
+                          onChange={() => isExcluded ? handleUnexcludePlayer(p.playerId) : handleExcludePlayer(p)}
+                          className="rounded"
+                        />
+                        <span className="flex-1">{p.playerName}</span>
+                        {p.team && <span className="text-gray-600 text-[10px]">{p.team}</span>}
+                      </label>
+                    );
+                  })}
+                  {filteredMatchPlayers.length === 0 && (
+                    <p className="text-xs text-gray-600 px-2 py-1">
+                      {matchPlayers.length === 0 ? 'No players loaded for this match yet.' : 'No players match your search.'}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Adjustable settings — tune the pool/odds range yourself instead
+              of asking for a code change each time. */}
+          <div className="mt-3 border-t border-gray-700/50 pt-3">
+            <button
+              onClick={() => setShowGameGetUpSettings(s => !s)}
+              className="flex items-center gap-1.5 text-xs font-medium text-gray-400 hover:text-gray-300"
+            >
+              <Wrench className="w-3.5 h-3.5" />
+              Adjust Settings
+              {showGameGetUpSettings ? <ChevronDown className="w-3 h-3 text-gray-500 ml-1" /> : <ChevronRight className="w-3 h-3 text-gray-500 ml-1" />}
+            </button>
+            {showGameGetUpSettings && (
+              <div className="mt-2 grid grid-cols-2 gap-3">
+                <label className="text-[10px] text-gray-500 uppercase">
+                  Min Legs
+                  <select
+                    value={gameGetUpSettings.minLegs}
+                    onChange={e => setGameGetUpSettings(s => ({ ...s, minLegs: Number(e.target.value) }))}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1"
+                  >
+                    {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </label>
+                <label className="text-[10px] text-gray-500 uppercase">
+                  Max Legs
+                  <select
+                    value={gameGetUpSettings.maxLegs}
+                    onChange={e => setGameGetUpSettings(s => ({ ...s, maxLegs: Number(e.target.value) }))}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1"
+                  >
+                    {[2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </label>
+                <label className="text-[10px] text-gray-500 uppercase">
+                  Preferred Min Odds
+                  <input
+                    type="number" step={0.05} min={1.01}
+                    value={gameGetUpSettings.preferredMinOdds}
+                    onChange={e => setGameGetUpSettings(s => ({ ...s, preferredMinOdds: Number(e.target.value) || s.preferredMinOdds }))}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1"
+                  />
+                </label>
+                <label className="text-[10px] text-gray-500 uppercase">
+                  Preferred Max Odds
+                  <input
+                    type="number" step={0.05} min={1.01}
+                    value={gameGetUpSettings.preferredMaxOdds}
+                    onChange={e => setGameGetUpSettings(s => ({ ...s, preferredMaxOdds: Number(e.target.value) || s.preferredMaxOdds }))}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1"
+                  />
+                </label>
+                <label className="text-[10px] text-gray-500 uppercase col-span-2">
+                  Hard Max Odds (never exceed)
+                  <input
+                    type="number" step={0.05} min={1.01}
+                    value={gameGetUpSettings.hardMaxOdds}
+                    onChange={e => setGameGetUpSettings(s => ({ ...s, hardMaxOdds: Number(e.target.value) || s.hardMaxOdds }))}
+                    className="w-full mt-1 bg-gray-800 border border-gray-700 text-white text-xs rounded px-2 py-1"
+                  />
+                </label>
+                <button
+                  onClick={() => setGameGetUpSettings({
+                    minLegs: GAME_GETUP_PRESET.minLegs ?? 2,
+                    maxLegs: GAME_GETUP_PRESET.maxLegs ?? 4,
+                    preferredMinOdds: GAME_GETUP_PRESET.preferredMinOdds,
+                    preferredMaxOdds: GAME_GETUP_PRESET.preferredMaxOdds,
+                    hardMaxOdds: GAME_GETUP_PRESET.hardMaxOdds,
+                  })}
+                  className="col-span-2 text-[10px] px-2 py-1 bg-gray-700 text-gray-400 border border-gray-600 rounded hover:bg-gray-600 transition"
+                >
+                  Reset to Defaults
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
