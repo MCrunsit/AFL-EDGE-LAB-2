@@ -24,6 +24,7 @@ import {
   type OptimizerDiagnostics,
   type OptimizerProgress,
   type CancellationRef,
+  type MultiOptimizerSettings,
 } from './multiOptimizer';
 import { calculateSafetyScore, type FloorBuffer, type SafetyScoreResult } from './safetyScore';
 import { classifyQualityTier, tierOrder, type QualityTier, type TierMetrics, type TierCheckResult } from './multiQualityTiers';
@@ -91,6 +92,10 @@ export interface GameGetUpInputs {
   matchNames: Record<string, string>;
   teamEnv?: TeamEnvironmentMap;
   roleTrends?: RoleTrendMap;
+  /** Overrides GAME_GETUP_PRESET's leg counts/odds range — lets the UI expose
+   * user-adjustable settings instead of a fixed constant. Any field left out
+   * falls back to the default preset's value. */
+  settings?: Partial<MultiOptimizerSettings>;
   cancelRef: CancellationRef | null;
   onProgress: (p: OptimizerProgress) => void;
 }
@@ -158,7 +163,7 @@ function classifyTier(multi: GameGetUpMulti): TierCheckResult {
  * correlationAdjustment), Data Confidence, role stability, closeness to
  * target odds. Implemented as a lexicographic comparator.
  */
-function compareGameGetUpCandidates(a: GameGetUpMulti, b: GameGetUpMulti): number {
+function compareGameGetUpCandidates(a: GameGetUpMulti, b: GameGetUpMulti, targetOdds: number): number {
   if (tierOrder(a.tier) !== tierOrder(b.tier)) return tierOrder(a.tier) - tierOrder(b.tier);
   if (a.conservativeProbability !== b.conservativeProbability) return b.conservativeProbability - a.conservativeProbability;
   const aMinSafety = a.minSafetyScore ?? -1;
@@ -171,8 +176,8 @@ function compareGameGetUpCandidates(a: GameGetUpMulti, b: GameGetUpMulti): numbe
   const aConf = a.avgDataConfidence ?? -1;
   const bConf = b.avgDataConfidence ?? -1;
   if (aConf !== bConf) return bConf - aConf;
-  const aTarget = Math.abs(a.combinedOdds - GAME_GETUP_PRESET.targetOdds);
-  const bTarget = Math.abs(b.combinedOdds - GAME_GETUP_PRESET.targetOdds);
+  const aTarget = Math.abs(a.combinedOdds - targetOdds);
+  const bTarget = Math.abs(b.combinedOdds - targetOdds);
   return aTarget - bTarget;
 }
 
@@ -236,9 +241,10 @@ function isDuplicate(a: GameGetUpMulti, b: GameGetUpMulti): boolean {
 
 export async function buildGameGetUp(inputs: GameGetUpInputs): Promise<GameGetUpResult> {
   const { recommendations, intelligenceByPlayerId, gameLogByPlayerId, matchNames, teamEnv, roleTrends, cancelRef, onProgress } = inputs;
+  const settings: MultiOptimizerSettings = { ...GAME_GETUP_PRESET, ...inputs.settings };
 
   const { valid, diagnostics } = await runCandidateSearchAsync(
-    recommendations, GAME_GETUP_PRESET, cancelRef, onProgress, matchNames, teamEnv, roleTrends,
+    recommendations, settings, cancelRef, onProgress, matchNames, teamEnv, roleTrends,
   );
 
   if (valid.length === 0) {
@@ -251,7 +257,7 @@ export async function buildGameGetUp(inputs: GameGetUpInputs): Promise<GameGetUp
   }
 
   const candidates = valid.map(m => toGameGetUpMulti(m, intelligenceByPlayerId, gameLogByPlayerId));
-  candidates.sort(compareGameGetUpCandidates);
+  candidates.sort((a, b) => compareGameGetUpCandidates(a, b, settings.targetOdds));
 
   const byLegCount = (n: number) => candidates.filter(c => c.legs.length === n);
   const twoLeg = byLegCount(2);
@@ -281,7 +287,7 @@ export async function buildGameGetUp(inputs: GameGetUpInputs): Promise<GameGetUp
     'Shorter-Priced Safer Alternative',
   );
 
-  const inTargetRange = candidates.filter(c => c.combinedOdds >= GAME_GETUP_PRESET.preferredMinOdds && c.combinedOdds <= GAME_GETUP_PRESET.preferredMaxOdds);
+  const inTargetRange = candidates.filter(c => c.combinedOdds >= settings.preferredMinOdds && c.combinedOdds <= settings.preferredMaxOdds);
   const targetRangeMulti = pickNext(inTargetRange.length > 0 ? inTargetRange : candidates, 'Target $1.60-$1.75 Multi');
 
   const higherPricedAlternative = pickNext(
