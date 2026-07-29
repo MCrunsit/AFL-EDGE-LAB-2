@@ -44,6 +44,7 @@ interface TrackedBet {
 interface TrackedMulti {
   id: string;
   created_at: string;
+  source: 'manual' | 'round_multi' | 'game_getup';
   combined_odds: number;
   estimated_adjusted_probability: number | null;
   estimated_adjusted_ev: number | null;
@@ -90,6 +91,7 @@ export default function BetTrackerPage() {
   const [filterMarket, setFilterMarket] = useState<string>('all');
   const [filterPlayer, setFilterPlayer] = useState<string>('all');
   const [filterConfidence, setFilterConfidence] = useState<string>('all');
+  const [filterSource, setFilterSource] = useState<string>('all');
   const [editingNotes, setEditingNotes] = useState<string | null>(null);
   const [notesDraft, setNotesDraft] = useState('');
   const [editingClosingOdds, setEditingClosingOdds] = useState<string | null>(null);
@@ -259,6 +261,7 @@ export default function BetTrackerPage() {
     if (filterResult !== 'all') result = result.filter(m => m.result === filterResult);
     if (filterMarket !== 'all') result = result.filter(m => m.legs.some(l => l.market === filterMarket));
     if (filterPlayer !== 'all') result = result.filter(m => m.legs.some(l => l.player_name === filterPlayer));
+    if (filterSource !== 'all') result = result.filter(m => m.source === filterSource);
     if (filterConfidence !== 'all') {
       result = result.filter(m => {
         const ev = (m.estimated_adjusted_ev ?? 0) * 100;
@@ -269,7 +272,7 @@ export default function BetTrackerPage() {
       });
     }
     return result;
-  }, [multis, filterResult, filterMarket, filterPlayer, filterConfidence]);
+  }, [multis, filterResult, filterMarket, filterPlayer, filterConfidence, filterSource]);
 
   async function saveNotes(id: string, type: 'single' | 'multi') {
     const table = type === 'single' ? 'tracked_bets' : 'tracked_multis';
@@ -431,6 +434,19 @@ export default function BetTrackerPage() {
             <option value="medium">Medium (5-12%)</option>
             <option value="high">High (12%+)</option>
           </select>
+          {activeTab !== 'singles' && (
+            <select
+              value={filterSource}
+              onChange={e => setFilterSource(e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+              title="Which builder produced this multi"
+            >
+              <option value="all">All Sources</option>
+              <option value="manual">Manual Builder</option>
+              <option value="round_multi">Round Multi</option>
+              <option value="game_getup">Game Get-Up</option>
+            </select>
+          )}
         </div>
       </div>
 
@@ -589,6 +605,9 @@ export default function BetTrackerPage() {
                     <span className="text-white font-bold font-mono">{multi.combined_odds.toFixed(2)}x</span>
                     <span className="text-xs text-blue-400">+{((multi.estimated_adjusted_ev || 0) * 100).toFixed(1)}% EV</span>
                     <span className="text-xs text-gray-500">{multi.legs.length} legs</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">
+                      {multi.source === 'round_multi' ? 'Round Multi' : multi.source === 'game_getup' ? 'Game Get-Up' : 'Manual'}
+                    </span>
                   </div>
                   <div className="flex items-center gap-2">
                     {multi.result === 'pending' ? (

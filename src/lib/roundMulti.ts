@@ -24,8 +24,8 @@ import type { TeamEnvironmentMap } from './teamStatsService';
 import type { RoleTrendMap } from './roleTrendService';
 import {
   runCandidateSearchAsync,
+  buildCustomMulti,
   type MultiOptimizerSettings,
-  type OptimizedMulti,
   type OptimizerLeg,
   type OptimizerProgress,
   type CancellationRef,
@@ -33,6 +33,7 @@ import {
 import { calculateSafetyScore, type FloorBuffer, type SafetyScoreResult } from './safetyScore';
 import { classifyQualityTier, tierOrder, type QualityTier, type TierMetrics } from './multiQualityTiers';
 import { applyRealCorrelationAdjustment, type CorrelationMethod } from './correlationModel';
+import type { TrackableMulti, TrackableMultiLeg } from './betTracking';
 
 export interface GameBlockSettings {
   minLegsPerGame: number;
@@ -136,6 +137,7 @@ export interface GameBlockInputs {
   roleTrends?: RoleTrendMap;
   cancelRef: CancellationRef | null;
   onProgress: (p: OptimizerProgress) => void;
+  excludedPlayerIds?: Set<string>;
 }
 
 function buildLegView(
@@ -187,6 +189,88 @@ function classifyBlockTier(legViews: GameBlockLegView[], conservativeProbability
   return classifyQualityTier(metrics);
 }
 
+function emptyGameBlock(matchId: string, matchName: string, noGenuineLinesAvailable: boolean): GameBlock {
+  return {
+    matchId, matchName, legs: [], legViews: [], combinedOdds: 0, rawProbability: 0,
+    correlationAdjustment: 0, correlationMethod: 'historical', conservativeProbability: 0, tier: 'BEST_AVAILABLE',
+    tierGapReasons: [], avgSafetyScore: null, minSafetyScore: null, avgDataConfidence: null,
+    weakestLeg: null as unknown as OptimizerLeg, weakestFloorBuffer: {
+      last5MinMargin: null, last10MinMargin: null, medianMargin: null, avgMargin: null,
+      p10Margin: null, timesExactlyOnLine: 0, timesOneAboveLine: 0, stdDev: null,
+      coefficientOfVariation: null, sampleSize: 0,
+    },
+    warnings: [], noGenuineLinesAvailable,
+  };
+}
+
+/**
+ * Score an arbitrary set of legs for one match into a full GameBlock —
+ * shared by buildGameBlock (once per search candidate) and
+ * recomputeGameBlockFromLegs (once, for a manually edited leg list). Legs
+ * must be non-empty and all distinct players; callers handle the empty case.
+ */
+export function scoreLegsIntoGameBlock(
+  matchId: string,
+  matchName: string,
+  legs: OptimizerLeg[],
+  intelligenceByPlayerId: Map<string, PlayerIntelligence>,
+  gameLogByPlayerId: Map<string, CanonicalGameRow[]>,
+): GameBlock {
+  const custom = buildCustomMulti(legs);
+  const rawProbability = custom?.rawProbability ?? legs.reduce((p, l) => p * l.adjustedProb, 1);
+  const combinedOdds = custom?.combinedOdds ?? legs.reduce((p, l) => p * l.odds, 1);
+
+  const legViews = legs.map(l => buildLegView(l, intelligenceByPlayerId, gameLogByPlayerId));
+  const safetyScores = legViews.map(lv => lv.safety.score).filter((s): s is number => s !== null);
+  const avgSafetyScore = safetyScores.length > 0 ? Math.round(safetyScores.reduce((a, b) => a + b, 0) / safetyScores.length) : null;
+  const minSafetyScore = safetyScores.length > 0 ? Math.min(...safetyScores) : null;
+  const confs = legViews.map(lv => lv.dataConfidence).filter((c): c is number => c !== null);
+  const avgDataConfidence = confs.length > 0 ? Math.round(confs.reduce((a, b) => a + b, 0) / confs.length) : null;
+
+  const realCorrelation = applyRealCorrelationAdjustment(legs, rawProbability, gameLogByPlayerId);
+  const { tier, gapReasons } = classifyBlockTier(legViews, realCorrelation.conservativeProbability, minSafetyScore);
+  const weakestLeg = weakestByProb(legs);
+  const weakestLegView = legViews.find(lv => lv.leg === weakestLeg) ?? legViews[0];
+
+  return {
+    matchId, matchName, legs, legViews,
+    combinedOdds, rawProbability,
+    correlationAdjustment: realCorrelation.correlationAdjustment,
+    correlationMethod: realCorrelation.method,
+    conservativeProbability: realCorrelation.conservativeProbability,
+    tier, tierGapReasons: gapReasons,
+    avgSafetyScore, minSafetyScore, avgDataConfidence,
+    weakestLeg,
+    weakestFloorBuffer: weakestLegView.safety.floorBuffer,
+    warnings: custom?.warnings ?? [],
+    noGenuineLinesAvailable: false,
+  };
+}
+
+/**
+ * Recompute a GameBlock from a manually edited leg list (add/remove leg in
+ * the UI) — pure and synchronous, no search. Since this bypasses the DFS
+ * search's own odds-cap enforcement, a combinedOdds above hardMaxOdds is
+ * surfaced as a warning rather than blocked, consistent with this being
+ * decision support only.
+ */
+export function recomputeGameBlockFromLegs(
+  matchId: string,
+  matchName: string,
+  legs: OptimizerLeg[],
+  intelligenceByPlayerId: Map<string, PlayerIntelligence>,
+  gameLogByPlayerId: Map<string, CanonicalGameRow[]>,
+  hardMaxOdds?: number,
+): GameBlock {
+  if (legs.length === 0) return emptyGameBlock(matchId, matchName, false);
+
+  const block = scoreLegsIntoGameBlock(matchId, matchName, legs, intelligenceByPlayerId, gameLogByPlayerId);
+  if (hardMaxOdds !== undefined && block.combinedOdds > hardMaxOdds) {
+    block.warnings = [...block.warnings, `Combined odds $${block.combinedOdds.toFixed(2)} above the $${hardMaxOdds.toFixed(2)} safety cap for this preset`];
+  }
+  return block;
+}
+
 /**
  * Build the safest Game Block for one match: searches leg counts ascending
  * from minLegsPerGame to maxLegsPerGame (never forcing more legs than
@@ -195,7 +279,7 @@ function classifyBlockTier(legViews: GameBlockLegView[], conservativeProbability
  * stays at $1.28 rather than being inflated toward $1.70.
  */
 export async function buildGameBlock(settings: GameBlockSettings, inputs: GameBlockInputs): Promise<GameBlock> {
-  const { matchId, matchName, recommendations, intelligenceByPlayerId, gameLogByPlayerId, teamEnv, roleTrends, cancelRef, onProgress } = inputs;
+  const { matchId, matchName, recommendations, intelligenceByPlayerId, gameLogByPlayerId, teamEnv, roleTrends, cancelRef, onProgress, excludedPlayerIds } = inputs;
 
   const searchSettings: MultiOptimizerSettings = {
     preset: 'gameBlock',
@@ -212,7 +296,7 @@ export async function buildGameBlock(settings: GameBlockSettings, inputs: GameBl
     maxLegs: settings.maxLegsPerGame,
   };
 
-  const matchRecommendations = recommendations.filter(r => r.matchId === matchId);
+  const matchRecommendations = recommendations.filter(r => r.matchId === matchId && !excludedPlayerIds?.has(r.playerId));
   const matchNames = { [matchId]: matchName };
 
   const { valid, diagnostics } = await runCandidateSearchAsync(
@@ -220,64 +304,25 @@ export async function buildGameBlock(settings: GameBlockSettings, inputs: GameBl
   );
 
   if (valid.length === 0) {
-    return {
-      matchId, matchName, legs: [], legViews: [], combinedOdds: 0, rawProbability: 0,
-      correlationAdjustment: 0, correlationMethod: 'historical', conservativeProbability: 0, tier: 'BEST_AVAILABLE',
-      tierGapReasons: [], avgSafetyScore: null, minSafetyScore: null, avgDataConfidence: null,
-      weakestLeg: null as unknown as OptimizerLeg, weakestFloorBuffer: {
-        last5MinMargin: null, last10MinMargin: null, medianMargin: null, avgMargin: null,
-        p10Margin: null, timesExactlyOnLine: 0, timesOneAboveLine: 0, stdDev: null,
-        coefficientOfVariation: null, sampleSize: 0,
-      },
-      warnings: [], noGenuineLinesAvailable: diagnostics.modelReadyDisposalRows === 0,
-    };
+    return emptyGameBlock(matchId, matchName, diagnostics.modelReadyDisposalRows === 0);
   }
 
-  const scored = valid.map((multi: OptimizedMulti) => {
-    const legViews = multi.legs.map(l => buildLegView(l, intelligenceByPlayerId, gameLogByPlayerId));
-    const safetyScores = legViews.map(lv => lv.safety.score).filter((s): s is number => s !== null);
-    const avgSafetyScore = safetyScores.length > 0 ? Math.round(safetyScores.reduce((a, b) => a + b, 0) / safetyScores.length) : null;
-    const minSafetyScore = safetyScores.length > 0 ? Math.min(...safetyScores) : null;
-    const confs = legViews.map(lv => lv.dataConfidence).filter((c): c is number => c !== null);
-    const avgDataConfidence = confs.length > 0 ? Math.round(confs.reduce((a, b) => a + b, 0) / confs.length) : null;
-    const realCorrelation = applyRealCorrelationAdjustment(multi.legs, multi.rawProbability, gameLogByPlayerId);
-    const { tier, gapReasons } = classifyBlockTier(legViews, realCorrelation.conservativeProbability, minSafetyScore);
-    return { multi, legViews, avgSafetyScore, minSafetyScore, avgDataConfidence, tier, gapReasons, realCorrelation };
-  });
+  const scored = valid.map(multi => ({
+    multi,
+    block: scoreLegsIntoGameBlock(matchId, matchName, multi.legs, intelligenceByPlayerId, gameLogByPlayerId),
+  }));
 
   // Prefer the best tier, then fewest legs (never pad), then highest
   // conservative probability, then closest to the odds cap from below —
   // i.e. don't artificially inflate a safe $1.28 block toward $1.70.
   scored.sort((a, b) => {
-    if (tierOrder(a.tier) !== tierOrder(b.tier)) return tierOrder(a.tier) - tierOrder(b.tier);
+    if (tierOrder(a.block.tier) !== tierOrder(b.block.tier)) return tierOrder(a.block.tier) - tierOrder(b.block.tier);
     if (a.multi.legs.length !== b.multi.legs.length) return a.multi.legs.length - b.multi.legs.length;
-    if (a.realCorrelation.conservativeProbability !== b.realCorrelation.conservativeProbability) return b.realCorrelation.conservativeProbability - a.realCorrelation.conservativeProbability;
-    return a.multi.combinedOdds - b.multi.combinedOdds;
+    if (a.block.conservativeProbability !== b.block.conservativeProbability) return b.block.conservativeProbability - a.block.conservativeProbability;
+    return a.block.combinedOdds - b.block.combinedOdds;
   });
 
-  const best = scored[0];
-  const weakestLeg = weakestByProb(best.multi.legs);
-  const weakestLegView = best.legViews.find(lv => lv.leg === weakestLeg) ?? best.legViews[0];
-
-  return {
-    matchId, matchName,
-    legs: best.multi.legs,
-    legViews: best.legViews,
-    combinedOdds: best.multi.combinedOdds,
-    rawProbability: best.multi.rawProbability,
-    correlationAdjustment: best.realCorrelation.correlationAdjustment,
-    correlationMethod: best.realCorrelation.method,
-    conservativeProbability: best.realCorrelation.conservativeProbability,
-    tier: best.tier,
-    tierGapReasons: best.gapReasons,
-    avgSafetyScore: best.avgSafetyScore,
-    minSafetyScore: best.minSafetyScore,
-    avgDataConfidence: best.avgDataConfidence,
-    weakestLeg,
-    weakestFloorBuffer: weakestLegView.safety.floorBuffer,
-    warnings: best.multi.warnings,
-    noGenuineLinesAvailable: false,
-  };
+  return scored[0].block;
 }
 
 export interface RoundMultiGameInput {
@@ -295,6 +340,7 @@ export interface BuildRoundMultiInputs {
   roleTrends?: RoleTrendMap;
   cancelRef: CancellationRef | null;
   onProgress: (p: OptimizerProgress) => void;
+  excludedPlayerIds?: Set<string>;
 }
 
 /**
@@ -353,7 +399,7 @@ export function combineGameBlocks(blocks: GameBlock[], excludedMatchIds: Set<str
  * expected, not an error, when many small safe blocks are combined.
  */
 export async function buildRoundMulti(settings: GameBlockSettings, inputs: BuildRoundMultiInputs): Promise<RoundMultiResult> {
-  const { games, excludedMatchIds, recommendations, intelligenceByPlayerId, gameLogByPlayerId, teamEnv, roleTrends, cancelRef, onProgress } = inputs;
+  const { games, excludedMatchIds, recommendations, intelligenceByPlayerId, gameLogByPlayerId, teamEnv, roleTrends, cancelRef, onProgress, excludedPlayerIds } = inputs;
 
   const blocks: GameBlock[] = [];
   for (const game of games) {
@@ -367,9 +413,45 @@ export async function buildRoundMulti(settings: GameBlockSettings, inputs: Build
       roleTrends,
       cancelRef,
       onProgress,
+      excludedPlayerIds,
     });
     blocks.push(block);
   }
 
   return combineGameBlocks(blocks, excludedMatchIds);
+}
+
+function legToTrackableLeg(leg: OptimizerLeg): TrackableMultiLeg {
+  return {
+    player_name: leg.playerName,
+    player_id: leg.playerId,
+    market: 'disposals',
+    line: leg.line.toString(),
+    display_label: leg.displayLabel,
+    odds: leg.odds,
+    adjusted_probability: leg.adjustedProb,
+    adjusted_ev: leg.adjustedEV,
+    match_id: leg.matchId,
+    position_group: leg.positionGroup,
+    position_edge_value: leg.row.positionEdge?.edge_value ?? null,
+    position_edge_significance: leg.row.positionEdge?.significance ?? null,
+    position_edge_adjustment: leg.row.positionEdgeAdjustment ?? null,
+  };
+}
+
+/**
+ * Flatten a built Round Multi's included blocks into one trackable multi —
+ * Round Multi never computes an EV figure of its own (unlike Game Get-Up),
+ * so combined_ev is left null.
+ */
+export function roundMultiResultToTrackable(result: RoundMultiResult, excludedMatchIds: Set<string>): TrackableMulti {
+  const usableBlocks = result.blocks.filter(b => !excludedMatchIds.has(b.matchId) && b.legs.length > 0);
+  return {
+    source: 'round_multi',
+    combined_odds: result.totalOdds,
+    combined_model_prob: result.conservativeProbability,
+    combined_ev: null,
+    use_position_edge: false,
+    legs: usableBlocks.flatMap(b => b.legs.map(legToTrackableLeg)),
+  };
 }

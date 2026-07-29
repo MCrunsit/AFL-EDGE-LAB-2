@@ -518,6 +518,7 @@ export interface TrackedBet {
 export interface TrackedMulti {
   id: string;
   created_at?: string | null;
+  source: 'manual' | 'round_multi' | 'game_getup';
   combined_odds: number;
   estimated_adjusted_probability?: number | null;
   estimated_adjusted_ev?: number | null;

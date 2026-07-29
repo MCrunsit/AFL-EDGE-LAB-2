@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { Users, Search, Save, ChevronDown, RefreshCw, Upload, Download, AlertCircle, Zap } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { POSITION_GROUPS } from '../lib/types';
-import { autoAssignPositionGroups } from '../lib/positionEdge';
+import { autoAssignPositionGroups, savePositionOverride, canonicalizePositionGroup } from '../lib/positionEdge';
 import { fetchAllRows } from '../lib/supabasePagination';
 import LoadingSpinner from '../components/LoadingSpinner';
 
@@ -107,6 +107,15 @@ export default function PositionGroupsPage() {
       .update({ position_group: positionGroup })
       .eq('id', playerId);
 
+    if (!error) {
+      // Also record this as a durable manual override, not just a
+      // players.position_group write — otherwise a future auto-assign run
+      // or CSV import can silently overwrite a manual correction with no
+      // way to tell it apart from a guess.
+      const player = players.find(p => p.id === playerId);
+      if (player) await savePositionOverride(player.name, player.team, positionGroup, 'high', 'manual');
+    }
+
     setSaving(null);
     if (!error) {
       setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, position_group: positionGroup } : p));
@@ -118,14 +127,25 @@ export default function PositionGroupsPage() {
     }
   }
 
+  // Scoped to the same pool as mappingStats/currentRoundStats below — this
+  // previously summed over the entire players table regardless of which tab
+  // was active, so the per-group totals could exceed (and disagree with)
+  // whichever total ("448 current round" or "all players") was on screen.
   const stats = useMemo(() => {
+    const pool = activeTab === 'currentRound' ? players.filter(p => currentRoundPlayerIds.has(p.id)) : players;
     const byGroup: Record<string, number> = {};
-    for (const p of players) {
-      const group = p.position_group ?? 'UNKNOWN';
+    for (const p of pool) {
+      // Canonicalize for display only (doesn't touch the DB) — a handful of
+      // players still carry legacy non-canonical values (e.g. 'MID-IN'
+      // instead of 'MID-INC'), which the tile grid below only renders for
+      // POSITION_GROUPS' canonical keys. Without this, those players are
+      // still counted in the total but silently missing from every tile,
+      // making the tiles undercount the total.
+      const group = canonicalizePositionGroup(p.position_group ?? 'UNKNOWN');
       byGroup[group] = (byGroup[group] ?? 0) + 1;
     }
     return byGroup;
-  }, [players]);
+  }, [players, activeTab, currentRoundPlayerIds]);
 
   const mappingStats = useMemo(() => {
     const total = players.length;
@@ -213,7 +233,7 @@ export default function PositionGroupsPage() {
     setAutoAssignMessage(null);
     try {
       const result = await autoAssignPositionGroups();
-      setAutoAssignMessage(`Auto-assigned ${result.updated} players (${result.skipped} skipped — UNKNOWN or insufficient games)`);
+      setAutoAssignMessage(`Guessed ${result.updated} players from stat thresholds (${result.skipped} skipped — UNKNOWN or insufficient games). These are unverified — check/correct them manually rather than trusting them as fact.`);
       await loadPlayers();
     } catch (err) {
       setAutoAssignMessage(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -356,10 +376,11 @@ export default function PositionGroupsPage() {
         <button
           onClick={handleAutoAssign}
           disabled={autoAssigning}
-          className="px-3 py-2 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-lg text-sm hover:bg-emerald-500/30 disabled:opacity-50 flex items-center gap-2"
+          title="Guesses position from disposal/mark/tackle/goal/hitout stat thresholds — not a genuine position source. Only touches players currently UNKNOWN; never overwrites a manual override."
+          className="px-3 py-2 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-lg text-sm hover:bg-amber-500/30 disabled:opacity-50 flex items-center gap-2"
         >
           <Zap className="w-4 h-4" />
-          {autoAssigning ? 'Assigning...' : 'Auto Assign All'}
+          {autoAssigning ? 'Guessing...' : 'Guess from Stats (unverified)'}
         </button>
         <input
           ref={fileInputRef}

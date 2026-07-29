@@ -25,6 +25,7 @@ import {
 } from '../lib/positionEdge';
 import { POSITION_GROUPS } from '../lib/types';
 import type { Match } from '../lib/types';
+import { clearSharedPositionEdgeCache } from '../lib/playerIntelligenceService';
 import LoadingSpinner from '../components/LoadingSpinner';
 
 interface PositionAuditData {
@@ -234,6 +235,10 @@ export default function PositionEdgePage() {
         setRecalcMessage(`Created/updated ${saved} position edge rows (${count} total computed).`);
         const newCount = await getPositionEdgeCount();
         setEdgeCount(newCount);
+        // Drop the shared in-memory cache so Player Search/Profile intelligence
+        // panels re-query fresh instead of serving pre-recalculation edges for
+        // the rest of the session.
+        clearSharedPositionEdgeCache();
         const newCache = await loadPositionEdgeCache();
         setCache(newCache);
       }

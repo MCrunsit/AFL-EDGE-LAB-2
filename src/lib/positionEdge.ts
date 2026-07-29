@@ -459,17 +459,29 @@ export async function calculatePositionEdges(season?: number): Promise<{ cache: 
   }
   diagnostics.statsRowsFetched = stats.length;
 
-  // Fetch players with position_group
+  // Fetch players with position_group. Chunked — an unchunked .in() with
+  // every distinct player_id (800-900+ UUIDs) builds a ~30KB+ URL that
+  // PostgREST rejects with a 400, which the old unchunked call never
+  // checked for (data silently ends up null/empty) — confirmed live this
+  // was actually happening, undercounting playersFetched/mappedPlayers to 0
+  // and producing zero edges despite 31000+ stats rows being fetched fine.
   const playerIds = [...new Set(stats.map(s => s.player_id).filter(Boolean))] as string[];
-  const { data: players } = await supabase
-    .from('players')
-    .select('id, position_group, team')
-    .in('id', playerIds);
+  const players: { id: string; position_group: string | null; team: string | null }[] = [];
+  const PLAYER_ID_CHUNK = 150;
+  for (let i = 0; i < playerIds.length; i += PLAYER_ID_CHUNK) {
+    const chunk = playerIds.slice(i, i + PLAYER_ID_CHUNK);
+    const { data, error } = await supabase
+      .from('players')
+      .select('id, position_group, team')
+      .in('id', chunk);
+    if (error) continue;
+    if (data) players.push(...data);
+  }
 
-  diagnostics.playersFetched = players?.length ?? 0;
+  diagnostics.playersFetched = players.length;
 
   const playerPositionMap = new Map<string, string>();
-  for (const p of players ?? []) {
+  for (const p of players) {
     const pg = p.position_group ?? 'UNKNOWN';
     playerPositionMap.set(p.id, pg);
     if (pg !== 'UNKNOWN') diagnostics.mappedPlayers++;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Database, Search, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Play, FileText, ArrowRight, Info, DownloadCloud, Wifi, ChevronDown, ChevronRight, Activity, Pause, Square, PlayCircle } from 'lucide-react';
+import { Database, Search, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Play, FileText, ArrowRight, Info, DownloadCloud, Wifi, ChevronDown, ChevronRight, Activity, Pause, Square, PlayCircle, Wrench, Loader2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import {
   auditMissingStats,
@@ -22,6 +22,7 @@ import {
   type AuditReason,
 } from '../lib/missingStatsRepair';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { runRound20FremantleWceRepair, type Round20RepairResult } from '../lib/repairRound20FremantleWce';
 
 interface MatchOption {
   id: string;
@@ -46,6 +47,68 @@ const REASON_COLORS: Record<AuditReason, string> = {
   'KALI_PLAYER_NOT_FOUND': 'bg-red-500/20 text-red-400 border-red-500/30',
   'TEAM_UNKNOWN': 'bg-gray-500/20 text-gray-400 border-gray-500/30',
 };
+
+/**
+ * One-time repair button for the Round 20 Fremantle vs West Coast Eagles
+ * stats-linking gap. Safe to click more than once — every write is scoped
+ * to specific, already-verified row ids, so re-running it after it has
+ * already succeeded is a no-op (the WHERE clauses simply match nothing the
+ * second time).
+ */
+function Round20FremantleWceRepairPanel() {
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<Round20RepairResult | null>(null);
+
+  async function handleRun() {
+    if (running) return;
+    setRunning(true);
+    setResult(null);
+    try {
+      const r = await runRound20FremantleWceRepair();
+      setResult(r);
+    } catch (e) {
+      setResult({ statsLinked: 0, duplicatesDeleted: 0, oddsRelinked: 0, errors: [e instanceof Error ? e.message : String(e)] });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="bg-gray-900 border border-amber-500/20 rounded-xl p-4 space-y-2">
+      <h2 className="text-white font-semibold text-sm flex items-center gap-2">
+        <Wrench className="w-4 h-4 text-amber-400" />
+        One-Time Fix: Round 20 Fremantle vs West Coast Eagles
+      </h2>
+      <p className="text-gray-500 text-xs">
+        Links the 46 already-imported player stats for this match (currently unlinked), removes 44 exact-duplicate rows
+        left over from a repeated import, and relinks the 46 bookmaker odds rows to the correct players.
+      </p>
+      <button
+        onClick={handleRun}
+        disabled={running}
+        className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-gray-950 text-xs font-bold rounded-lg transition"
+      >
+        {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+        Run Fix
+      </button>
+      {result && (
+        <div className="mt-2 text-xs space-y-1">
+          <p className="text-emerald-400">Stats rows linked: {result.statsLinked}</p>
+          <p className="text-emerald-400">Duplicate rows removed: {result.duplicatesDeleted}</p>
+          <p className="text-emerald-400">Bookmaker odds relinked: {result.oddsRelinked}</p>
+          {result.errors.length > 0 && (
+            <div className="text-red-400">
+              {result.errors.map((e, i) => <p key={i}>{e}</p>)}
+            </div>
+          )}
+          {result.errors.length === 0 && (
+            <p className="text-gray-500">Done — refresh the page and check Round 20 in Multi Builder / Dry Run above.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function MissingStatsRepairPage() {
   const [matches, setMatches] = useState<MatchOption[]>([]);
@@ -446,6 +509,8 @@ export default function MissingStatsRepairPage() {
           This is a data-level fix — Multi Builder reads the cleaned data afterwards.
         </p>
       </div>
+
+      <Round20FremantleWceRepairPanel />
 
       {/* Match selector */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">

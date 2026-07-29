@@ -155,6 +155,13 @@ export function getSharedPositionEdgeCache(): Promise<PositionEdgeCache> {
   return sharedCachePromise;
 }
 
+/** Call after recalculating position_edges (or correcting position_group
+ * values) so the next call to getSharedPositionEdgeCache() re-queries fresh
+ * data instead of serving whatever was cached at session start. */
+export function clearSharedPositionEdgeCache(): void {
+  sharedCachePromise = null;
+}
+
 const POSITION_GROUP_LABELS: Record<string, string> = {
   'DEF-GEN': 'general defenders', 'DEF-KEY': 'key defenders', 'DEF-USER': 'rebounding defenders',
   'FWD-GEN': 'general forwards', 'FWD-KEY': 'key forwards', 'FWD-SML': 'small forwards',

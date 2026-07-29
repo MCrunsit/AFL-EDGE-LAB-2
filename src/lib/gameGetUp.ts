@@ -29,8 +29,14 @@ import {
 import { calculateSafetyScore, type FloorBuffer, type SafetyScoreResult } from './safetyScore';
 import { classifyQualityTier, tierOrder, type QualityTier, type TierMetrics, type TierCheckResult } from './multiQualityTiers';
 import { applyRealCorrelationAdjustment, type CorrelationMethod } from './correlationModel';
+import type { TrackableMulti, TrackableMultiLeg } from './betTracking';
+import type { TeamLineOption, TeamLineHistoryEntry } from './teamLine';
+import {
+  buildTeamLineLeg, computeTeamLineAttachment, type TeamLineLeg,
+} from './teamLineAttach';
 
 export type { QualityTier } from './multiQualityTiers';
+export type { TeamLineLeg } from './teamLineAttach';
 
 export interface GameGetUpLegView {
   leg: OptimizerLeg;
@@ -44,9 +50,27 @@ export interface RelaxationStep {
   reason: string;
 }
 
+export interface GameGetUpTeamLineSettings {
+  allowTeamLines: boolean;
+  preferTeamLines: boolean;
+  teamLinesOnly: boolean;
+  minTeamLineSafetyScore: number | null;
+  minTeamLineCoverProbability: number | null;
+}
+
+export const DEFAULT_TEAM_LINE_SETTINGS: GameGetUpTeamLineSettings = {
+  allowTeamLines: false,
+  preferTeamLines: false,
+  teamLinesOnly: false,
+  minTeamLineSafetyScore: null,
+  minTeamLineCoverProbability: null,
+};
+
 export interface GameGetUpMulti {
   legs: OptimizerLeg[];
   legViews: GameGetUpLegView[];
+  /** At most one — Team Lines are capped to one per match by construction. */
+  teamLineLeg: TeamLineLeg | null;
   combinedOdds: number;
   rawProbability: number;
   correlationAdjustment: number; // fraction removed — historical when enough shared-game data exists, else a conservative flat fallback per pair
@@ -75,6 +99,10 @@ export interface GameGetUpResult {
   safestTwoLeg: GameGetUpMulti | null;
   safestThreeLeg: GameGetUpMulti | null;
   bestAvailable: GameGetUpMulti | null;
+  /** Every buildable Team Line option for this match, scored — always
+   * populated regardless of allowTeamLines, so the manual "Team Markets"
+   * picker always has data even when automatic recommendations don't use it. */
+  teamLineOptions: TeamLineLeg[];
   diagnostics: OptimizerDiagnostics;
   noGenuineLinesAvailable: boolean;
 }
@@ -96,6 +124,12 @@ export interface GameGetUpInputs {
    * user-adjustable settings instead of a fixed constant. Any field left out
    * falls back to the default preset's value. */
   settings?: Partial<MultiOptimizerSettings>;
+  /** Pre-fetched via getTeamLineOptionsForMatch — this module never fetches
+   * match_odds itself, same convention as gameLogByPlayerId. */
+  teamLineOptions?: TeamLineOption[];
+  /** Pre-fetched via getTeamLineHistory, keyed by team name. */
+  teamLineHistoryByTeam?: Map<string, TeamLineHistoryEntry[]>;
+  teamLineSettings?: Partial<GameGetUpTeamLineSettings>;
   cancelRef: CancellationRef | null;
   onProgress: (p: OptimizerProgress) => void;
 }
@@ -119,6 +153,36 @@ function buildLegView(
 
 function weakestByProb(legs: OptimizerLeg[]): OptimizerLeg {
   return legs.reduce((min, l) => (l.adjustedProb < min.adjustedProb ? l : min), legs[0]);
+}
+
+/**
+ * Fold a Team Line leg into an already-built player-only multi. Always
+ * callable (backs the manual-add path regardless of settings). Delegates
+ * the odds/probability math to teamLineAttach.ts's shared core, which every
+ * builder (Game Get-Up, Game Multi, Build Your Own) uses identically.
+ */
+export function attachManualTeamLine(base: GameGetUpMulti, teamLineLeg: TeamLineLeg): GameGetUpMulti {
+  const attached = computeTeamLineAttachment({
+    combinedOdds: base.combinedOdds,
+    rawProbability: base.rawProbability,
+    conservativeProbability: base.conservativeProbability,
+    playerLegCount: base.legs.length,
+  }, teamLineLeg);
+
+  const estimatedEV = attached.conservativeProbability * attached.combinedOdds - 1;
+  const cp = teamLineLeg.coverProbability.coverProbability;
+
+  return {
+    ...base,
+    teamLineLeg,
+    combinedOdds: attached.combinedOdds,
+    rawProbability: attached.rawProbability,
+    correlationAdjustment: attached.totalHaircut,
+    correlationMethod: cp !== null && base.correlationMethod === 'historical' ? 'mixed' : base.correlationMethod,
+    conservativeProbability: attached.conservativeProbability,
+    estimatedEV,
+    warnings: [...base.warnings, attached.warning],
+  };
 }
 
 /**
@@ -206,6 +270,7 @@ function toGameGetUpMulti(
   const draft: GameGetUpMulti = {
     legs: multi.legs,
     legViews,
+    teamLineLeg: null,
     combinedOdds: multi.combinedOdds,
     rawProbability,
     correlationAdjustment: realCorrelation.correlationAdjustment,
@@ -242,6 +307,24 @@ function isDuplicate(a: GameGetUpMulti, b: GameGetUpMulti): boolean {
 export async function buildGameGetUp(inputs: GameGetUpInputs): Promise<GameGetUpResult> {
   const { recommendations, intelligenceByPlayerId, gameLogByPlayerId, matchNames, teamEnv, roleTrends, cancelRef, onProgress } = inputs;
   const settings: MultiOptimizerSettings = { ...GAME_GETUP_PRESET, ...inputs.settings };
+  const teamLineSettings: GameGetUpTeamLineSettings = { ...DEFAULT_TEAM_LINE_SETTINGS, ...inputs.teamLineSettings };
+
+  // Always score every Team Line option regardless of allowTeamLines, so
+  // the manual "Team Markets" picker always has real numbers to offer.
+  const teamLineOptions: TeamLineLeg[] = (inputs.teamLineOptions ?? []).map(
+    option => buildTeamLineLeg(option, inputs.teamLineHistoryByTeam?.get(option.teamName) ?? []),
+  );
+
+  // The single best qualifying option (RATED, passes both minimums) — Game
+  // Get-Up is single-match scoped, so "best" just means highest safety
+  // score among the (at most two) sides of this match's line.
+  const qualifyingTeamLine = teamLineSettings.allowTeamLines
+    ? teamLineOptions
+        .filter(tl => tl.coverProbability.coverProbability !== null && tl.safety.score !== null)
+        .filter(tl => teamLineSettings.minTeamLineSafetyScore === null || (tl.safety.score ?? 0) >= teamLineSettings.minTeamLineSafetyScore)
+        .filter(tl => teamLineSettings.minTeamLineCoverProbability === null || (tl.coverProbability.coverProbability ?? 0) >= teamLineSettings.minTeamLineCoverProbability)
+        .sort((a, b) => (b.safety.score ?? 0) - (a.safety.score ?? 0))[0] ?? null
+    : null;
 
   const { valid, diagnostics } = await runCandidateSearchAsync(
     recommendations, settings, cancelRef, onProgress, matchNames, teamEnv, roleTrends,
@@ -251,12 +334,28 @@ export async function buildGameGetUp(inputs: GameGetUpInputs): Promise<GameGetUp
     return {
       primarySafest: null, shorterPricedAlternative: null, targetRangeMulti: null,
       higherPricedAlternative: null, safestSingleLeg: null, safestTwoLeg: null,
-      safestThreeLeg: null, bestAvailable: null, diagnostics,
+      safestThreeLeg: null, bestAvailable: null, teamLineOptions, diagnostics,
       noGenuineLinesAvailable: diagnostics.modelReadyDisposalRows === 0,
     };
   }
 
-  const candidates = valid.map(m => toGameGetUpMulti(m, intelligenceByPlayerId, gameLogByPlayerId));
+  const playerOnlyCandidates = valid.map(m => toGameGetUpMulti(m, intelligenceByPlayerId, gameLogByPlayerId));
+
+  // Allow Team Lines is a permission gate only — Prefer/Only decide whether
+  // automatic named outputs (primarySafest etc.) actually attach it. A plain
+  // "Allow" with neither Prefer nor Only leaves automatic recommendations
+  // player-only (byte-identical to today) while still surfacing the option
+  // for manual add via result.teamLineOptions.
+  let candidates = playerOnlyCandidates;
+  if (qualifyingTeamLine) {
+    const attached = playerOnlyCandidates.map(c => attachManualTeamLine(c, qualifyingTeamLine));
+    if (teamLineSettings.teamLinesOnly) {
+      candidates = attached;
+    } else if (teamLineSettings.preferTeamLines) {
+      candidates = [...attached, ...playerOnlyCandidates];
+    }
+  }
+
   candidates.sort((a, b) => compareGameGetUpCandidates(a, b, settings.targetOdds));
 
   const byLegCount = (n: number) => candidates.filter(c => c.legs.length === n);
@@ -318,6 +417,7 @@ export async function buildGameGetUp(inputs: GameGetUpInputs): Promise<GameGetUp
     safestTwoLeg,
     safestThreeLeg,
     bestAvailable: bestAvailable ? { ...bestAvailable, labels: [...bestAvailable.labels, 'Best Available'] } : null,
+    teamLineOptions,
     diagnostics,
     noGenuineLinesAvailable: false,
   };
@@ -326,4 +426,51 @@ export async function buildGameGetUp(inputs: GameGetUpInputs): Promise<GameGetUp
 /** Boost is a payout-only transform — it must never alter probability. */
 export function applyBoost(combinedOdds: number, boostMultiplier: number): number {
   return combinedOdds * boostMultiplier;
+}
+
+function legToTrackableLeg(leg: OptimizerLeg): TrackableMultiLeg {
+  return {
+    player_name: leg.playerName,
+    player_id: leg.playerId,
+    market: 'disposals',
+    line: leg.line.toString(),
+    display_label: leg.displayLabel,
+    odds: leg.odds,
+    adjusted_probability: leg.adjustedProb,
+    adjusted_ev: leg.adjustedEV,
+    match_id: leg.matchId,
+    position_group: leg.positionGroup,
+    position_edge_value: leg.row.positionEdge?.edge_value ?? null,
+    position_edge_significance: leg.row.positionEdge?.significance ?? null,
+    position_edge_adjustment: leg.row.positionEdgeAdjustment ?? null,
+  };
+}
+
+function teamLineLegToTrackableLeg(teamLineLeg: TeamLineLeg): TrackableMultiLeg {
+  const { option } = teamLineLeg;
+  return {
+    player_name: option.teamName,
+    player_id: null,
+    market: 'team_line',
+    line: option.point.toString(),
+    display_label: `${option.teamName} ${option.point > 0 ? '+' : ''}${option.point}`,
+    odds: option.odds,
+    adjusted_probability: teamLineLeg.coverProbability.coverProbability,
+    adjusted_ev: null,
+    match_id: option.matchId,
+  };
+}
+
+export function gameGetUpMultiToTrackable(multi: GameGetUpMulti): TrackableMulti {
+  return {
+    source: 'game_getup',
+    combined_odds: multi.combinedOdds,
+    combined_model_prob: multi.conservativeProbability,
+    combined_ev: multi.estimatedEV,
+    use_position_edge: false,
+    legs: [
+      ...multi.legs.map(legToTrackableLeg),
+      ...(multi.teamLineLeg ? [teamLineLegToTrackableLeg(multi.teamLineLeg)] : []),
+    ],
+  };
 }

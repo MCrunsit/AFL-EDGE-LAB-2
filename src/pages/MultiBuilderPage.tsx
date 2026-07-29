@@ -1,15 +1,19 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Shield, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target, Link as LinkIcon, ChevronDown, ChevronRight } from 'lucide-react';
+import { Layers, TrendingUp, X, AlertTriangle, AlertCircle, CheckCircle, Check, Shield, Info, Users, Zap, Crosshair, MapPin, Swords, UserX, Ban, Filter, RotateCcw, RefreshCw, Activity, Wrench, Calendar, Target, Link as LinkIcon, ChevronDown, ChevronRight } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { extractStatType } from '../lib/oddsNormalizer';
 import { getPositionEdgeColor, type PositionEdgeResult, type VenueEdgeResult, type OpponentEdgeResult } from '../lib/positionEdge';
-import { checkDuplicateMulti } from '../lib/betTracking';
+import { trackMulti as trackMultiToBetTracker } from '../lib/betTracking';
 import { getDataStatus } from '../lib/playerStatsSync';
 import { getActiveBettingSlate, getRoundInfo, getMatchesForRound, type RoundInfo } from '../lib/roundManager';
 import { relinkRoundOddsToCanonicalPlayers, type RelinkResult } from '../lib/playerMatching';
 import { buildDisposalLineRecommendations, getSelectionReason, getCriteriaForMode, type DisposalLineRecommendation, type LineSafetyMode } from '../lib/disposalLineSelector';
 import { getExcludedPlayerIds } from '../lib/playerExclusions';
+import { isPlayerUsed, markPlayerUsed, unmarkPlayerUsed } from '../lib/playerUsage';
+import { getTeamLineOptionsForMatch, getTeamLineHistory } from '../lib/teamLine';
+import { buildTeamLineLeg, computeTeamLineAttachment, type TeamLineLeg } from '../lib/teamLineAttach';
+import { TeamLineLegRow, TeamMarketsPicker } from '../components/TeamLineSection';
 import type { Match } from '../lib/types';
 import LoadingSpinner from '../components/LoadingSpinner';
 import ErrorBoundary from '../components/ErrorBoundary';
@@ -85,6 +89,10 @@ interface ExcludedItem {
 
 export default function MultiBuilderPage() {
   const [matches, setMatches] = useState<Match[]>([]);
+  const currentRound = matches[0]?.round ?? 'unknown';
+  // "Already used in a multi" badges read localStorage directly (not React
+  // state), so bump this after every mark/unmark to force a re-render.
+  const [, forceUsageRefresh] = useState(0);
   const [selectedMatchIds, setSelectedMatchIds] = useState<string[]>([]);
   const [modelledRows, setModelledRows] = useState<ModelledOddsRow[]>([]);
   const [coverage, setCoverage] = useState<ModelCoverage | null>(null);
@@ -103,6 +111,12 @@ export default function MultiBuilderPage() {
   } | null>(null);
   const [targetOdds, setTargetOdds] = useState('2.00');
   const [manualLegs, setManualLegs] = useState<MultiLeg[]>([]);
+  // Team Lines for the cross-match Manual Multi tray — at most one per
+  // match currently represented in manualLegs, per the "max one Team Line
+  // per match" rule (matches, not the whole multi, since this tray can span
+  // several matches).
+  const [manualTeamLineByMatch, setManualTeamLineByMatch] = useState<Map<string, TeamLineLeg>>(new Map());
+  const [manualTeamLineOptionsByMatch, setManualTeamLineOptionsByMatch] = useState<Map<string, TeamLineLeg[]>>(new Map());
   // Live counts reported up by MultiOptimizerPanel — the single source of truth for
   // "how many recommended multis / eligible legs are actually on screen right now".
   // Diagnostics below reads this instead of a separate, disconnected calculation.
@@ -813,11 +827,63 @@ export default function MultiBuilderPage() {
     }
   }
 
-  const manualCombinedOdds = manualLegs.reduce((acc, l) => acc * l.odds, 1);
-  const manualCombinedProb = manualLegs.reduce((acc, l) => acc * l.modelProb, 1);
-  const manualCombinedEV = manualCombinedProb * manualCombinedOdds - 1;
+  const manualLegsMatchIds = Array.from(new Set(manualLegs.map(l => l.matchId)));
 
-  const manualWarnings: string[] = [];
+  // Fetch Team Line options for every match currently represented in the
+  // tray — lazily, only for matches not already cached.
+  useEffect(() => {
+    const toFetch = manualLegsMatchIds.filter(id => !manualTeamLineOptionsByMatch.has(id));
+    if (toFetch.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(toFetch.map(async matchId => {
+        const match = matches.find(m => m.id === matchId);
+        if (!match?.home_team || !match?.away_team) return [matchId, [] as TeamLineLeg[]] as const;
+        const options = await getTeamLineOptionsForMatch(matchId, match.home_team, match.away_team);
+        const historyByTeam = new Map(await Promise.all(
+          [match.home_team, match.away_team].map(async team => [team, await getTeamLineHistory(team, matchId)] as const),
+        ));
+        return [matchId, options.map(o => buildTeamLineLeg(o, historyByTeam.get(o.teamName) ?? []))] as const;
+      }));
+      if (cancelled) return;
+      setManualTeamLineOptionsByMatch(prev => {
+        const next = new Map(prev);
+        for (const [matchId, legs] of entries) next.set(matchId, legs);
+        return next;
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [manualLegsMatchIds.join(','), matches]);
+
+  // Drop any manually attached Team Line whose match no longer has legs in
+  // the tray, so removing the last leg from a match cleanly clears its line too.
+  useEffect(() => {
+    setManualTeamLineByMatch(prev => {
+      if (prev.size === 0) return prev;
+      const next = new Map(Array.from(prev).filter(([matchId]) => manualLegsMatchIds.includes(matchId)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [manualLegsMatchIds.join(',')]);
+
+  const manualPlayerLegsOdds = manualLegs.reduce((acc, l) => acc * l.odds, 1);
+  const manualPlayerLegsProb = manualLegs.reduce((acc, l) => acc * l.modelProb, 1);
+  const manualTeamLineWarnings: string[] = [];
+  let manualCombinedOdds = manualPlayerLegsOdds;
+  let manualCombinedProb = manualPlayerLegsProb;
+  let manualConservativeProb = manualPlayerLegsProb;
+  for (const teamLine of manualTeamLineByMatch.values()) {
+    const attached = computeTeamLineAttachment({
+      combinedOdds: manualCombinedOdds, rawProbability: manualCombinedProb,
+      conservativeProbability: manualConservativeProb, playerLegCount: manualLegs.length,
+    }, teamLine);
+    manualCombinedOdds = attached.combinedOdds;
+    manualCombinedProb = attached.rawProbability;
+    manualConservativeProb = attached.conservativeProbability;
+    manualTeamLineWarnings.push(attached.warning);
+  }
+  const manualCombinedEV = manualConservativeProb * manualCombinedOdds - 1;
+
+  const manualWarnings: string[] = [...manualTeamLineWarnings];
   const manualPlayers = new Set<string>();
   for (const leg of manualLegs) manualPlayers.add(leg.playerKey);
   if (!allowSamePlayer && manualLegs.length !== manualPlayers.size) {
@@ -860,40 +926,13 @@ export default function MultiBuilderPage() {
   }
 
   async function trackMulti(candidate: MultiCandidate) {
-    // Check duplicate
-    const isDuplicate = await checkDuplicateMulti(
-      candidate.legs.map(l => ({
-        player_name: l.row.player_name,
-        market: extractStatType(l.row.raw_market),
-        display_label: l.row.display_label,
-        odds: l.odds
-      })),
-      candidate.combined_odds
-    );
-
-    if (isDuplicate) {
-      setMessage('This multi is already tracked');
-      setTimeout(() => setMessage(null), 4000);
-      return;
-    }
-
-    const { data: multi, error } = await supabase
-      .from('tracked_multis')
-      .insert({
-        combined_odds: candidate.combined_odds,
-        estimated_adjusted_probability: candidate.combined_model_prob,
-        estimated_adjusted_ev: candidate.combined_ev,
-        match_ids: [...new Set(candidate.legs.map(l => l.matchId))] as string[],
-        use_position_edge: usePositionEdge,
-        estimated_final_probability: usePositionEdge ? candidate.combined_model_prob : null,
-        estimated_final_ev: usePositionEdge ? candidate.combined_ev : null,
-      })
-      .select()
-      .single();
-
-    if (multi && !error) {
-      const legsData = candidate.legs.map(leg => ({
-        multi_id: multi.id,
+    const result = await trackMultiToBetTracker({
+      source: 'manual',
+      combined_odds: candidate.combined_odds,
+      combined_model_prob: candidate.combined_model_prob,
+      combined_ev: candidate.combined_ev,
+      use_position_edge: usePositionEdge,
+      legs: candidate.legs.map(leg => ({
         player_name: leg.row.player_name,
         player_id: leg.row.player_id,
         market: leg.statKey,
@@ -909,12 +948,17 @@ export default function MultiBuilderPage() {
         position_edge_adjustment: leg.positionEdgeAdjustment,
         final_probability: leg.finalProbability,
         final_ev: leg.finalEV,
-      }));
+      })),
+    });
 
-      await supabase.from('tracked_multi_legs').insert(legsData);
+    if (result.duplicate) {
+      setMessage('This multi is already tracked');
+    } else if (result.success) {
       setMessage('Multi tracked');
-      setTimeout(() => setMessage(null), 4000);
+    } else {
+      setMessage(`Failed to track multi${result.error ? `: ${result.error}` : ''}`);
     }
+    setTimeout(() => setMessage(null), 4000);
   }
 
   if (matchesLoading) return <LoadingSpinner message="Loading fixtures..." />;
@@ -1974,6 +2018,18 @@ export default function MultiBuilderPage() {
                   {manualCombinedEV >= 0 ? '+' : ''}{(manualCombinedEV * 100).toFixed(1)}% EV
                 </span>
               </div>
+              {manualTeamLineByMatch.size > 0 && (
+                <div>
+                  {Array.from(manualTeamLineByMatch.entries()).map(([matchId, leg]) => (
+                    <TeamLineLegRow
+                      key={matchId}
+                      leg={leg}
+                      onRemove={() => setManualTeamLineByMatch(prev => { const next = new Map(prev); next.delete(matchId); return next; })}
+                    />
+                  ))}
+                </div>
+              )}
+              <p className="px-3 pt-2 text-[10px] text-gray-500 uppercase font-semibold">Player Props</p>
               <div className="p-3 space-y-2">
                 {manualLegs.map((leg, i) => (
                   <div key={i} className="flex items-center gap-3 p-2 bg-gray-800/40 rounded-lg">
@@ -1991,6 +2047,26 @@ export default function MultiBuilderPage() {
                   </div>
                 ))}
               </div>
+              {manualLegsMatchIds.length > 0 && (
+                <div>
+                  <p className="px-3 text-[10px] text-gray-500 uppercase font-semibold">Team Markets</p>
+                  {manualLegsMatchIds.filter(id => !manualTeamLineByMatch.has(id)).map(matchId => {
+                    const match = matches.find(m => m.id === matchId);
+                    const options = manualTeamLineOptionsByMatch.get(matchId) ?? [];
+                    return (
+                      <div key={matchId}>
+                        <p className="px-3 pt-1 text-[9px] text-gray-600">{match ? `${match.home_team} vs ${match.away_team}` : matchId}</p>
+                        <TeamMarketsPicker
+                          options={options}
+                          current={null}
+                          onAdd={leg => setManualTeamLineByMatch(prev => new Map(prev).set(matchId, leg))}
+                          onRemove={() => {}}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               {manualWarnings.length > 0 && (
                 <div className="px-4 py-2 border-t border-amber-500/30 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/5">
                   <AlertTriangle className="w-3 h-3" />
@@ -2105,6 +2181,9 @@ export default function MultiBuilderPage() {
                           <div className="flex items-center gap-2">
                             <p className="text-white text-xs font-medium truncate">{row.player_name}</p>
                             {isAdded && <CheckCircle className="w-3 h-3 text-emerald-400" />}
+                            {isPlayerUsed(currentRound, playerKey) && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-400 border-amber-500/30 shrink-0">Used</span>
+                            )}
                           </div>
                           <p className="text-gray-500 text-xs">{statKey} {row.display_label}</p>
                         </div>
@@ -2121,6 +2200,18 @@ export default function MultiBuilderPage() {
                       </div>
                     </button>
                     <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 flex items-center gap-1 transition">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (isPlayerUsed(currentRound, playerKey)) unmarkPlayerUsed(currentRound, playerKey);
+                          else markPlayerUsed(currentRound, { playerId: playerKey, playerName: row.player_name, source: 'manual' });
+                          forceUsageRefresh(n => n + 1);
+                        }}
+                        className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded transition"
+                        title={isPlayerUsed(currentRound, playerKey) ? 'Already used in a multi this round — click to allow reuse' : 'Mark as already used in a multi this round'}
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
