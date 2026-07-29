@@ -34,6 +34,7 @@ const navGroups = [
       { to: '/players', label: 'Player Search', icon: Search },
       { to: '/trends', label: 'Trend Engine', icon: Activity },
       { to: '/position-edge', label: 'Position Edge', icon: Crosshair },
+      { to: '/model-review', label: 'Model Review', icon: BarChart3 },
     ],
   },
   {
